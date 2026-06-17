@@ -10,7 +10,8 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     username = Column(String(100), nullable=False, unique=True)
     email = Column(String(255), nullable=False, unique=True)
-    password_hash = Column(String(255), nullable=False)
+    # Nullable: Google-only accounts have no local password.
+    password_hash = Column(String(255), nullable=True)
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
     role = Column(String(20), nullable=False)
@@ -19,8 +20,25 @@ class User(Base):
     last_login = Column(DateTime(timezone=True), nullable=True)
     profile_image_url = Column(Text, nullable=True)
     bio = Column(Text, nullable=True)
-    moodle_user_id = Column(Integer, nullable=True)
     settings = Column(JSONB, server_default='{}')
+
+    # Authentication
+    auth_provider = Column(String(20), nullable=False, server_default="local")  # local | google | both
+    google_id = Column(String(255), unique=True, nullable=True)
+    reset_token = Column(String(255), nullable=True)
+    reset_token_expires = Column(DateTime(timezone=True), nullable=True)
+    # Email verification (manual sign-ups must confirm a code)
+    is_verified = Column(Boolean, nullable=False, server_default="false")
+    verification_code = Column(String(10), nullable=True)
+    verification_code_expires = Column(DateTime(timezone=True), nullable=True)
+    # Pending email change — the new address must be confirmed with a code sent
+    # to it before it replaces the current email.
+    pending_email = Column(String(255), nullable=True)
+    email_change_code = Column(String(10), nullable=True)
+    email_change_expires = Column(DateTime(timezone=True), nullable=True)
+
+    # Moodle (legacy — removed incrementally as native paths replace them)
+    moodle_user_id = Column(Integer, nullable=True)
     user_token = Column(Text, unique=True, nullable=True)
     
     # Add check constraint on role

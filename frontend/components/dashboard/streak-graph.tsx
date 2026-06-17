@@ -89,7 +89,7 @@ const AccomplishmentGraph: React.FC<AccomplishmentGraphProps> = ({ data }) => {
 
   return (
     <div className="accomplishment-graph">
-      <div className="grid grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6">
         <Card
           className="border-none shadow-md transition-shadow duration-300"
           style={{ background: "linear-gradient(145deg, #ffffff, #f5f0ff)" }}
@@ -140,13 +140,14 @@ const AccomplishmentGraph: React.FC<AccomplishmentGraphProps> = ({ data }) => {
       </div>
 
       <Card
-        className="border-none shadow-md hover:shadow-lg transition-shadow duration-300 p-6"
+        className="border-none shadow-md hover:shadow-lg transition-shadow duration-300 p-3 sm:p-6 overflow-x-auto"
         style={{ background: "linear-gradient(145deg, #ffffff, #f8f5ff)" }}
       >
+        <div className="min-w-[340px]">
         <div className="flex items-start mb-4">
-          <div className="w-12 flex-shrink-0"></div>
+          <div className="w-8 sm:w-12 flex-shrink-0"></div>
           <div
-            className="flex-1 grid grid-cols-15 gap-1 text-xs text-gray-500"
+            className="flex-1 grid grid-cols-15 gap-1 text-[10px] sm:text-xs text-gray-500"
             style={{ gridTemplateColumns: "repeat(15, 1fr)" }}
           >
             {Array(15)
@@ -160,9 +161,9 @@ const AccomplishmentGraph: React.FC<AccomplishmentGraphProps> = ({ data }) => {
         </div>
 
         <div className="flex items-start">
-          <div className="w-12 flex-shrink-0 flex flex-col justify-around">
+          <div className="w-8 sm:w-12 flex-shrink-0 flex flex-col justify-around">
             {dayLabels.map((day, i) => (
-              <div key={i} className="h-3 text-xs text-gray-500 pr-2 leading-3">
+              <div key={i} className="h-3 text-[10px] sm:text-xs text-gray-500 pr-1 sm:pr-2 leading-3">
                 {day}
               </div>
             ))}
@@ -231,6 +232,7 @@ const AccomplishmentGraph: React.FC<AccomplishmentGraphProps> = ({ data }) => {
             />
           ))}
           <div className="ml-2">More</div>
+        </div>
         </div>
       </Card>
     </div>

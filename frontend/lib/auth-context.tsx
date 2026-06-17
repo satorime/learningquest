@@ -9,15 +9,17 @@ import React, {
 } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { apiClient, MoodleLoginResult } from "./api-client";
-import { getMoodleUserByField } from "./api-utils";
 
 export type User = {
   id: string;
   token: string;
+  refreshToken?: string;
   username: string;
   name: string;
   email: string;
   role: string;
+  // NOTE: legacy field name. Now holds the native backend user id (string).
+  // Kept so existing components keyed on `moodleId` keep working; rename in cleanup.
   moodleId: string;
   avatarUrl?: string;
   bio?: string;
@@ -26,15 +28,57 @@ export type User = {
   badges?: number;
 };
 
+interface RegisterData {
+  username: string;
+  email: string;
+  password: string;
+  first_name: string;
+  last_name: string;
+}
+
+interface RegisterResult {
+  success: boolean;
+  email?: string;
+  message?: string;
+  error?: string;
+}
+
 interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   login: (username: string, password: string) => Promise<MoodleLoginResult>;
+  register: (data: RegisterData) => Promise<RegisterResult>;
+  verifyEmail: (email: string, code: string) => Promise<MoodleLoginResult>;
+  resendVerification: (email: string) => Promise<{ message: string }>;
+  loginWithGoogle: (idToken: string) => Promise<MoodleLoginResult>;
   logout: () => void;
   setUser: (user: User | null) => void;
+  updateUser: (patch: Partial<User>) => void;
 }
 
+const STORAGE_KEY = "learningquest_user";
+const LEGACY_KEYS = ["moodlequest_user", "moodle_user"];
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+/** Map a backend user payload + tokens into the client User shape. */
+function toUser(apiUser: any, token: string, refreshToken?: string): User {
+  const name =
+    `${apiUser.first_name || ""} ${apiUser.last_name || ""}`.trim() ||
+    apiUser.username;
+  const id = String(apiUser.id ?? "");
+  return {
+    id,
+    token,
+    refreshToken,
+    username: apiUser.username,
+    name,
+    email: apiUser.email || "",
+    role: apiUser.role || "student",
+    moodleId: id,
+    avatarUrl: apiUser.profile_image_url || "",
+  };
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -43,106 +87,69 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
 
-  // Mark component as mounted on client-side
   useEffect(() => {
     setIsMounted(true);
   }, []);
 
-  // TEMPORARY: Auto-login with dummy teacher account for development
-  /*
+  // Restore session from storage on mount.
   useEffect(() => {
-    if (isMounted) {
-      console.info(
-        "🔧 DEVELOPMENT MODE: Auto-logging in with dummy teacher account"
-      );
-
-      // Create dummy teacher user
-      const dummyTeacher: User = {
-        id: "1",
-        token: "dev-token-123",
-        username: "dev-teacher",
-        name: "Development Teacher",
-        email: "dev-teacher@example.com",
-        role: "teacher",
-        moodleId: "1",
-        avatarUrl:
-          "https://ui-avatars.com/api/?name=Dev+Teacher&background=4f46e5&color=fff",
-        level: 10,
-        xp: 5000,
-        badges: 5,
-      };
-
-      // Set user and save to local storage
-      setUser(dummyTeacher);
-      // localStorage.setItem("moodlequest_user", JSON.stringify(dummyTeacher));
-
-      // Update loading state
-      setIsLoading(false);
-    }
-  }, [isMounted]);
-  */
-
-  // Check for existing session on component mount
-  useEffect(() => {
-    const loadUserFromStorage = () => {
-      try {
-        if (typeof window !== "undefined") {
-          // Check for user data in localStorage
-          let storedUser = localStorage.getItem("moodlequest_user");
-
-          // Fallback to old key for backward compatibility
-          if (!storedUser) {
-            storedUser = localStorage.getItem("moodle_user");
-            // If found with old key, migrate to new key
-            if (storedUser) {
-              localStorage.setItem("moodlequest_user", storedUser);
-              localStorage.removeItem("moodle_user");
-            }
-          }
-
-          if (storedUser) {
-            const userData = JSON.parse(storedUser);
-            // console.log("Loaded user from storage:", userData);
-            // Set the token in the API client
-            apiClient.setToken(userData.token);
-
-            // Use the stored user data directly
-            setUser(userData);
-          } else {
-            console.log("No user found in storage");
+    if (!isMounted) return;
+    try {
+      let stored = localStorage.getItem(STORAGE_KEY);
+      if (!stored) {
+        for (const key of LEGACY_KEYS) {
+          const legacy = localStorage.getItem(key);
+          if (legacy) {
+            stored = legacy;
+            localStorage.setItem(STORAGE_KEY, legacy);
+            localStorage.removeItem(key);
+            break;
           }
         }
-      } catch (error) {
-        console.error("Error loading user from storage:", error);
-        localStorage.removeItem("moodlequest_user");
-        localStorage.removeItem("moodle_user");
-      } finally {
-        setIsLoading(false);
       }
-    };
-
-    if (isMounted) {
-      loadUserFromStorage();
-    } else {
+      if (stored) {
+        const userData = JSON.parse(stored);
+        apiClient.setTokens(userData.token, userData.refreshToken || "");
+        setUser(userData);
+      }
+    } catch (error) {
+      console.error("Error loading user from storage:", error);
+      localStorage.removeItem(STORAGE_KEY);
+    } finally {
       setIsLoading(false);
     }
   }, [isMounted]);
 
-  // Update token in API client whenever user changes
+  // Keep the API client tokens in sync with the user.
   useEffect(() => {
-    if (user?.token) {
-      apiClient.setToken(user.token);
-    } else {
-      apiClient.setToken("");
-    }
+    apiClient.setTokens(user?.token || "", user?.refreshToken || "");
   }, [user]);
 
-  // Redirect unauthenticated users away from protected routes
+  // When the client silently refreshes the access token (on a 401), persist the
+  // new tokens so they survive reloads.
+  useEffect(() => {
+    apiClient.setOnTokensRefreshed((access, refresh) => {
+      setUser((prev) => {
+        if (!prev) return prev;
+        const updated = { ...prev, token: access, refreshToken: refresh };
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+        } catch {
+          /* ignore */
+        }
+        return updated;
+      });
+    });
+  }, []);
+
+  // Redirect unauthenticated users away from protected routes.
   useEffect(() => {
     if (!isLoading && isMounted) {
       const publicRoutes = [
         "/signin",
         "/register",
+        "/forgot-password",
+        "/reset-password",
         "/",
         "/learn-more",
         "/faq",
@@ -151,160 +158,96 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const isPublicRoute = publicRoutes.some((route) =>
         pathname?.startsWith(route)
       );
-
       if (!user && !isPublicRoute) {
         router.push("/signin");
       }
     }
   }, [user, isLoading, isMounted, pathname, router]);
 
-  const login = async (username: string, password: string) => {
-    try {
-      const result = await apiClient.login(username, password);
-
-      if (result.success && result.user) {
-        // Ensure we have a complete user object with all required fields
-        const userData: User = {
-          id: result.user.id || "",
-          token: result.token || result.access_token || "",
-          username: result.user.username || username,
-          name: result.user.name || result.user.username || username,
-          email: result.user.email || "",
-          role: result.user.role || "student",
-          moodleId: result.user.moodleId || result.user.id || "",
-          avatarUrl: result.user.avatarUrl || "",
-          level: result.user.level,
-          xp: result.user.xp,
-          badges: result.user.badges,
-        };
-        // console.log("Hello");
-        // If we have a token, try to get extended user info from Moodle
-        if (userData.token) {
-          try {
-            const userInfoResult = await getMoodleUserByField(
-              userData.token,
-              "username",
-              userData.username
-            );
-
-            if (userInfoResult.success && userInfoResult.user) {
-              const moodleUser = userInfoResult.user;
-
-              // Update user data with Moodle information
-              userData.name =
-                `${moodleUser.firstname || ""} ${
-                  moodleUser.lastname || ""
-                }`.trim() || userData.name;
-              userData.email = moodleUser.email || userData.email;
-              userData.avatarUrl =
-                moodleUser.profileimageurl || userData.avatarUrl;
-
-              // Store this updated user in backend - use AbortController to set timeout
-              try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-                // Attempt to store user data but don't let it block the login process
-                fetch("/api/auth/moodle/store-user", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    moodleId: moodleUser.id,
-                    username: userData.username,
-                    email: userData.email,
-                    firstName: moodleUser.firstname || "",
-                    lastName: moodleUser.lastname || "",
-                    token: userData.token,
-                  }),
-                  signal: controller.signal,
-                })
-                  .catch((storeError) => {
-                    // Silently handle errors during store user - this shouldn't block login
-                    console.warn(
-                      "Non-critical: Failed to store user data in backend:",
-                      storeError
-                    );
-                  })
-                  .finally(() => {
-                    clearTimeout(timeoutId);
-                  });
-              } catch (storeError) {
-                // Silently ignore errors as they shouldn't block the login flow
-                console.warn(
-                  "Non-critical: Exception during store user setup:",
-                  storeError
-                );
-              }
-            }
-          } catch (userInfoError) {
-            console.warn("Failed to get extended user info:", userInfoError);
-          }
-        }
-
-        setUser(userData);
-        localStorage.setItem("moodlequest_user", JSON.stringify(userData));
-      }
-
-      return result;
-    } catch (error) {
-      console.error("Login error:", error);
-      throw error;
+  function persist(result: MoodleLoginResult): MoodleLoginResult {
+    if (result.success && result.user) {
+      const userData = toUser(
+        result.user,
+        result.token || result.access_token || "",
+        result.refresh_token
+      );
+      setUser(userData);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(userData));
     }
+    return result;
+  }
+
+  const login = async (username: string, password: string) => {
+    return persist(await apiClient.login(username, password));
+  };
+
+  const register = async (data: RegisterData) => {
+    // Does not log in — registration now requires email verification.
+    return apiClient.register(data);
+  };
+
+  const verifyEmail = async (email: string, code: string) => {
+    return persist(await apiClient.verifyEmail(email, code));
+  };
+
+  const resendVerification = async (email: string) => {
+    return apiClient.resendVerification(email);
+  };
+
+  const loginWithGoogle = async (idToken: string) => {
+    return persist(await apiClient.googleLogin(idToken));
+  };
+
+  // Merge a partial update into the current user and persist it so the change
+  // survives reloads (used by profile editing).
+  const updateUser = (patch: Partial<User>) => {
+    setUser((prev) => {
+      if (!prev) return prev;
+      const updated = { ...prev, ...patch };
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      } catch {
+        /* ignore */
+      }
+      return updated;
+    });
   };
 
   const logout = () => {
-    // Clear user state first to prevent unauthorized requests
+    apiClient.logout().catch(() => {});
     setUser(null);
-
-    // Clear API client token
     apiClient.setToken("");
-
-    // Clear all storage
-    localStorage.removeItem("moodlequest_user");
-    localStorage.removeItem("moodle_user");
-
-    localStorage.removeItem("theme");
+    localStorage.removeItem(STORAGE_KEY);
+    LEGACY_KEYS.forEach((k) => localStorage.removeItem(k));
     sessionStorage.clear();
-
-    // Clear any cookies related to authentication
-    document.cookie.split(";").forEach((cookie) => {
-      const [name] = cookie.trim().split("=");
-      document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/`;
-    });
-
-    // Call API logout endpoint with a timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
-
-    // fetch("/api/auth/moodle/logout", {
-    //   method: "POST",
-    //   signal: controller.signal,
-    // })
-    //   .catch((error) => {
-    //     // Silently handle network errors during logout
-    //     console.warn("Non-critical: Error during logout API call:", error);
-    //   })
-    //   .finally(() => {
-    //     clearTimeout(timeoutId);
-
-    //     // Force navigation and reload after cleanup
-    //     window.setTimeout(() => {
-    //       router.push("/signin");
-
-    //       // After navigation initiated, force reload to clear any lingering state
-    //       window.setTimeout(() => {
-    //         window.location.reload();
-    //       }, 100);
-    //     }, 100);
-    //   });
-
     router.push("/signin");
   };
 
-  // Only provide the real context value after mounting on client
   const contextValue = isMounted
-    ? { user, isLoading, login, logout, setUser }
-    : { user: null, isLoading: true, login, logout, setUser };
+    ? {
+        user,
+        isLoading,
+        login,
+        register,
+        verifyEmail,
+        resendVerification,
+        loginWithGoogle,
+        logout,
+        setUser,
+        updateUser,
+      }
+    : {
+        user: null,
+        isLoading: true,
+        login,
+        register,
+        verifyEmail,
+        resendVerification,
+        loginWithGoogle,
+        logout,
+        setUser,
+        updateUser,
+      };
 
   return (
     <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>

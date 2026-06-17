@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactNode, useState } from "react";
 import { AuthProvider } from "@/lib/auth-context";
 import { XPRewardProvider } from "@/contexts/xp-reward-context";
+import { BadgeAwardListener } from "@/components/badges/badge-award-popup";
+import { LevelUpListener } from "@/components/dashboard/level-up-popup";
 import { Toaster } from "react-hot-toast";
 
 export function Providers({ children }: { children: ReactNode }) {
@@ -24,6 +26,8 @@ export function Providers({ children }: { children: ReactNode }) {
       <AuthProvider>
         <XPRewardProvider>
           {children}
+          <BadgeAwardListener />
+          <LevelUpListener />
           <Toaster
             position="top-right"
             reverseOrder={false}

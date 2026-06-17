@@ -9,7 +9,7 @@ export function FeaturesSection() {
             <div className="inline-block rounded-lg bg-purple-100 px-3 py-1 text-sm dark:bg-purple-800">Features</div>
             <h2 className="text-3xl font-bold tracking-tighter sm:text-5xl">Gamified Learning Experience</h2>
             <p className="max-w-[900px] text-gray-500 md:text-xl/relaxed lg:text-base/relaxed xl:text-xl/relaxed dark:text-gray-400">
-              MoodleQuest transforms traditional learning with interactive elements that boost engagement and
+              LearningQuest transforms traditional learning with interactive elements that boost engagement and
               motivation.
             </p>
           </div>

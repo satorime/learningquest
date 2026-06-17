@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.database.connection import get_db
 from app.models.user import User
@@ -19,7 +19,7 @@ from app.schemas.virtual_pet import (
     AvailableAccessoryResponse,
     AccessoriesListResponse
 )
-from app.utils.auth import get_current_active_user, get_current_user_from_moodle_token
+from app.utils.auth import get_current_active_user
 from app.services.activity_log_service import log_activity
 from app.services.pet_service import PetService
 from app.services.daily_quest_service import DailyQuestService
@@ -31,10 +31,52 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/virtual-pet", tags=["virtual-pet"])
 
 
+# How fast the pet's stats decay while it is left alone. These rates are also
+# mirrored on the frontend so the live display matches what the server persists.
+HAPPINESS_DECAY_PER_HOUR = 5.0
+ENERGY_DECAY_PER_HOUR = 3.0
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now (matches the DB's timestamptz columns)."""
+    return datetime.now(timezone.utc)
+
+
+def _apply_time_decay(pet: VirtualPet, db: Session, commit: bool = True) -> None:
+    """Decay happiness/energy based on the real time elapsed since the pet was
+    last touched, then persist it.
+
+    This is what makes the decline survive logout/login: instead of relying on a
+    client-side timer (which is lost on refresh), we recompute from the stored
+    ``last_updated`` timestamp every time the pet is read or interacted with.
+    """
+    ref = pet.last_updated or pet.last_fed or pet.created_at
+    if ref is None:
+        pet.last_updated = _utcnow()
+        if commit:
+            db.commit()
+        return
+
+    # timestamptz columns come back tz-aware; guard against a naive value just in case.
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+
+    elapsed_hours = (_utcnow() - ref).total_seconds() / 3600.0
+    if elapsed_hours <= 0:
+        return
+
+    pet.happiness = float(max(0, min(100, round(pet.happiness - HAPPINESS_DECAY_PER_HOUR * elapsed_hours))))
+    pet.energy = float(max(0, min(100, round(pet.energy - ENERGY_DECAY_PER_HOUR * elapsed_hours))))
+    pet.last_updated = _utcnow()
+    if commit:
+        db.commit()
+        db.refresh(pet)
+
+
 @router.get("/check-pet", response_model=PetCheckResponse)
 async def check_pet(
     request: Request,
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -67,7 +109,7 @@ async def check_pet(
 @router.get("/get-pet", response_model=PetGetResponse)
 async def get_pet(
     request: Request,
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -79,17 +121,23 @@ async def get_pet(
         
         pet_service = PetService(db)
         pet = pet_service.get_pet_with_synchronized_level(current_user.id)
-        
+
         if not pet:
             logger.info(f"No pet found for user {current_user.username} (ID: {current_user.id})")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No virtual pet found for this user"
             )
-        
+
+        # Apply time-based decay so happiness/energy reflect time spent away.
+        _apply_time_decay(pet, db)
+
+        # XP progress toward the next level (drives the level bar).
+        progress = pet_service.get_level_progress(current_user.id)
+
         # Get pet accessories
         accessories = db.query(PetAccessory).filter(PetAccessory.pet_id == pet.pet_id).all()
-        
+
         accessories_data = []
         for accessory in accessories:
             accessories_data.append(PetAccessoryResponse(
@@ -103,30 +151,34 @@ async def get_pet(
                 is_equipped=bool(accessory.is_equipped),
                 created_at=accessory.created_at
             ))
-        
+
         pet_data = PetResponse(
             pet_id=pet.pet_id,
             name=pet.name,
             species=pet.species,
             happiness=pet.happiness,
             energy=pet.energy,
+            food=pet.food or 0,
             level=pet.level,  # Now synchronized with user level
+            exp_into_level=progress["exp_into_level"],
+            exp_for_next_level=progress["exp_for_next_level"],
+            exp_progress=progress["exp_progress"],
             last_fed=pet.last_fed,
             last_played=pet.last_played,
             created_at=pet.created_at,
             last_updated=pet.last_updated,
             accessories=accessories_data
         )
-        
+
         logger.info(f"Successfully retrieved pet '{pet.name}' for user {current_user.username}")
-        
+
         return PetGetResponse(
             success=True,
             has_pet=True,
             pet=pet_data,
             message=f"Pet '{pet.name}' loaded successfully"
         )
-        
+
     except HTTPException:
         raise  # Re-raise HTTPExceptions as-is
     except Exception as e:
@@ -141,7 +193,7 @@ async def get_pet(
 async def create_pet_new(
     pet_data: PetCreateRequest,
     request: Request,
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -233,9 +285,9 @@ async def create_pet_new(
 
 
 @router.post("/sync-level", response_model=LevelSyncResponse)
-async def sync_pet_level(
+def sync_pet_level(
     request: Request,
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -254,7 +306,14 @@ async def sync_pet_level(
             )
         
         logger.info(f"Successfully synced pet level for user {current_user.username}")
-        
+
+        # Award any pet-level milestone badges the new level unlocks (best-effort).
+        try:
+            from ..services.badge_service import BadgeService
+            BadgeService(db).check_and_award_badges(current_user.id)
+        except Exception as badge_exc:  # noqa: BLE001 - never block level sync
+            logger.warning(f"Badge check after pet level sync failed: {badge_exc}")
+
         return LevelSyncResponse(
             success=True,
             message="Pet level synchronized successfully",
@@ -278,7 +337,7 @@ async def sync_pet_level(
 @router.get("/accessories", response_model=AccessoriesListResponse)
 async def get_available_accessories(
     request: Request,
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -326,7 +385,7 @@ async def get_available_accessories(
 
 
 @router.get("/my-pet", response_model=PetGetResponse)
-async def get_my_pet(
+def get_my_pet(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -345,10 +404,16 @@ async def get_my_pet(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No virtual pet found for this user"
             )
-        
+
+        # Apply time-based decay so happiness/energy reflect time spent away.
+        _apply_time_decay(pet, db)
+
+        # XP progress toward the next level (drives the level bar).
+        progress = PetService(db).get_level_progress(current_user.id)
+
         # Get pet accessories
         accessories = db.query(PetAccessory).filter(PetAccessory.pet_id == pet.pet_id).all()
-        
+
         accessories_data = []
         for accessory in accessories:
             accessories_data.append(PetAccessoryResponse(
@@ -362,30 +427,34 @@ async def get_my_pet(
                 is_equipped=bool(accessory.is_equipped),
                 created_at=accessory.created_at
             ))
-        
+
         pet_data = PetResponse(
             pet_id=pet.pet_id,
             name=pet.name,
             species=pet.species,
             happiness=pet.happiness,
             energy=pet.energy,
+            food=pet.food or 0,
             level=pet.level,  # Add the missing level field
+            exp_into_level=progress["exp_into_level"],
+            exp_for_next_level=progress["exp_for_next_level"],
+            exp_progress=progress["exp_progress"],
             last_fed=pet.last_fed,
             last_played=pet.last_played,
             created_at=pet.created_at,
             last_updated=pet.last_updated,
             accessories=accessories_data
         )
-        
+
         logger.info(f"Successfully retrieved pet '{pet.name}' for user {current_user.username}")
-        
+
         return PetGetResponse(
             success=True,
             has_pet=True,
             pet=pet_data,
             message=f"Pet '{pet.name}' loaded successfully"
         )
-        
+
     except HTTPException:
         raise  # Re-raise HTTPExceptions as-is
     except Exception as e:
@@ -483,7 +552,7 @@ async def create_pet(
 async def update_pet_name(
     pet_data: PetUpdateNameRequest,
     request: Request,
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -616,7 +685,7 @@ async def delete_pet(
 @router.post("/equip-accessory", response_model=dict)
 async def equip_accessory(
     request: Request,
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     # Get parameters from request body
@@ -730,7 +799,7 @@ async def equip_accessory(
 @router.get("/equipped-accessories", response_model=dict)
 async def get_equipped_accessories(
     request: Request,
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -787,38 +856,47 @@ async def get_equipped_accessories(
 @router.post("/feed", response_model=dict)
 async def feed_pet(
     request: Request,
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
     Feed the current user's pet. Also completes the 'Feed your pet' daily quest if available.
     """
     try:
-        pet = db.query(VirtualPet).filter(VirtualPet.user_id == current_user.id).first()
+        # Lock the pet row so two concurrent feed requests can't both pass the
+        # food check and double-spend a single unit of food.
+        pet = (
+            db.query(VirtualPet)
+            .filter(VirtualPet.user_id == current_user.id)
+            .with_for_update()
+            .first()
+        )
         if not pet:
             raise HTTPException(status_code=404, detail="No pet found for this user")
 
-        # Update pet stats
-        pet.energy = min(100.0, pet.energy + 20)
-        pet.happiness = min(100.0, pet.happiness + 10)
-        pet.last_fed = datetime.utcnow()
-        pet.last_updated = datetime.utcnow()
+        # Settle any pending decay first.
+        _apply_time_decay(pet, db, commit=False)
+
+        # Feeding costs 1 food and restores 15 energy.
+        if (pet.food or 0) <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No food — earn some by completing quizzes and daily quests.",
+            )
+        pet.food = pet.food - 1
+        pet.energy = min(100.0, pet.energy + 15)
+        pet.last_fed = _utcnow()
+        pet.last_updated = _utcnow()
         db.commit()
-
-        # Complete the 'Feed your pet' daily quest if available
-        daily_quest_service = DailyQuestService(db)
-        quest_result = daily_quest_service.complete_feed_pet_quest(current_user.id)
-
-        # Optionally, send XP notification if quest was completed (already handled in service)
 
         return {
             "success": True,
             "message": "Pet fed successfully!",
             "pet_stats": {
                 "happiness": pet.happiness,
-                "energy": pet.energy
+                "energy": pet.energy,
+                "food": pet.food,
             },
-            "daily_quest": quest_result
         }
     except HTTPException:
         raise
@@ -827,4 +905,52 @@ async def feed_pet(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to feed pet"
+        )
+
+
+@router.post("/play", response_model=dict)
+async def play_with_pet(
+    request: Request,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Play with the current user's pet. Raises happiness at the cost of energy,
+    and persists the result so it survives logout/login.
+    """
+    try:
+        pet = db.query(VirtualPet).filter(VirtualPet.user_id == current_user.id).first()
+        if not pet:
+            raise HTTPException(status_code=404, detail="No pet found for this user")
+
+        # Settle any pending decay first.
+        _apply_time_decay(pet, db, commit=False)
+
+        if pet.energy <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Your pet is too tired to play. Feed it first."
+            )
+
+        pet.happiness = min(100.0, pet.happiness + 15)
+        pet.energy = max(0.0, pet.energy - 10)
+        pet.last_played = _utcnow()
+        pet.last_updated = _utcnow()
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "You played with your pet!",
+            "pet_stats": {
+                "happiness": pet.happiness,
+                "energy": pet.energy
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error playing with pet for user {current_user.id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to play with pet"
         )

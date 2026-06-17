@@ -1,1324 +1,520 @@
-from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
-from fastapi.security import OAuth2PasswordRequestForm
+"""Native authentication routes (email/password + Google Sign-In).
+
+Replaces the previous Moodle-backed login flow. Issues our own JWT access +
+refresh tokens, stored in the `tokens` table so they can be revoked.
+"""
+from datetime import datetime, timedelta, timezone
+import logging
+import re
+import secrets
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now (matches the DB's timestamptz columns)."""
+    return datetime.now(timezone.utc)
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import or_, func
+
 from app.database.connection import get_db
 from app.models.user import User
-from app.models.auth import MoodleConfig
 from app.schemas.auth import (
-    UserResponse, 
-    UserLogin, 
-    Token, 
-    MoodleLoginResponse, 
-    MoodleConfigResponse,
-    StoreUserRequest
+    UserResponse,
+    Token,
+    RegisterRequest,
+    RegisterResponse,
+    VerifyEmailRequest,
+    ResendVerificationRequest,
+    LoginRequest,
+    GoogleAuthRequest,
+    RefreshRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    UpdateProfileRequest,
+    ChangeEmailRequest,
+    ConfirmEmailChangeRequest,
 )
-from app.services.moodle import MoodleService
 from app.services.activity_log_service import log_activity
+from app.services.google_auth import verify_google_id_token, GoogleAuthError
+from app.services.email import send_verification_code, send_email_change_code
 from app.utils.auth import (
-    get_password_hash, 
-    create_access_token, 
-    create_refresh_token, 
-    get_current_active_user, 
-    get_role_required,
+    get_password_hash,
+    verify_password,
+    create_access_token,
+    create_refresh_token,
+    get_current_active_user,
     store_token,
-    validate_moodle_token,
+    revoke_token,
+    decode_token,
     ACCESS_TOKEN_EXPIRE_MINUTES,
-    REFRESH_TOKEN_EXPIRE_DAYS
+    REFRESH_TOKEN_EXPIRE_DAYS,
 )
-import os
-import logging
-import requests
-import json
+from app.config import RESET_TOKEN_EXPIRE_MINUTES, VERIFICATION_CODE_EXPIRE_MINUTES
+from app.utils.rate_limit import rate_limit
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# CORS Headers for responses
-CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept, Origin, X-Requested-With",
-}
+# Per-IP throttles on credential / code / email endpoints (brute-force + abuse).
+_rl_login = rate_limit("login", max_calls=10, window_seconds=300)
+_rl_register = rate_limit("register", max_calls=5, window_seconds=600)
+_rl_verify = rate_limit("verify_email", max_calls=10, window_seconds=300)
+_rl_resend = rate_limit("resend_verification", max_calls=3, window_seconds=600)
+_rl_forgot = rate_limit("forgot_password", max_calls=5, window_seconds=900)
+_rl_reset = rate_limit("reset_password", max_calls=10, window_seconds=900)
+_rl_google = rate_limit("google_login", max_calls=20, window_seconds=300)
 
 
-def sync_user_from_moodle(user: User, moodle_user: dict, db: Session = None) -> None:
-    """
-    Synchronize user data from Moodle to our database.
-    
-    Args:
-        user: User model to update
-        moodle_user: Moodle user data dictionary    """
-    # Update basic user information
-    if "id" in moodle_user:
-        user.moodle_user_id = int(moodle_user["id"])
-    if "email" in moodle_user:
-        user.email = moodle_user["email"]
-    if "firstname" in moodle_user:
-        user.first_name = moodle_user["firstname"]
-    if "lastname" in moodle_user:
-        user.last_name = moodle_user["lastname"]
-    if "profileimageurl" in moodle_user:
-        user.profile_image_url = moodle_user["profileimageurl"]
-    if "description" in moodle_user:
-        user.bio = moodle_user["description"]
-    
-    # Update role based on Moodle roles
-    roles = moodle_user.get("roles", [])
-    is_teacher = False
-    is_admin = False
-    
-    # Check various ways Moodle might provide role information
-    if roles:
-        # Standard roles array
-        is_teacher = any(
-            role.get("shortname", "").startswith("teacher") or
-            role.get("shortname") == "editingteacher" or
-            role.get("shortname") == "manager"
-            for role in roles
-        )
-        
-        is_admin = any(
-            role.get("shortname") == "admin" or
-            role.get("shortname") == "manager"
-            for role in roles
-        )
-    elif "capabilities" in moodle_user:
-        # Check for capabilities (alternative way Moodle might provide permissions)
-        caps = moodle_user.get("capabilities", {})
-        is_teacher = caps.get("moodle/course:manageactivities", False) or caps.get("moodle/course:update", False)
-        is_admin = caps.get("moodle/site:config", False) or caps.get("moodle/site:doanything", False)
-    elif "userroleid" in moodle_user:
-        # Direct role ID from core_webservice_get_site_info
-        role_id = int(moodle_user["userroleid"])
-        # Common Moodle role IDs, may need adjustment for your instance
-        is_admin = role_id in [1, 2]  # Admin, Manager
-        is_teacher = role_id in [3, 4]  # Teacher, Non-editing teacher
-    
-    # Set appropriate role
-    if is_admin:
-        user.role = "admin"
-    elif is_teacher:
-        user.role = "teacher"
-    else:
-        user.role = "student"
-    logger.info(f"Synchronized user {user.username} with Moodle data, role: {user.role}")
-    # Log login activity for students if db is provided
-    if db is not None and user.role == "student":
-        log_activity(
-            db=db,
-            user_id=user.id,
-            action_type="login",
-            action_details={"method": "moodle_sync"},
-            related_entity_type="user",
-            related_entity_id=user.id
-        )
-    
-
-@router.options("/moodle/login", status_code=200)
-async def options_moodle_login():
-    """Handle preflight request for CORS"""
-    return Response(headers=CORS_HEADERS)
-
-
-@router.post("/moodle/login", response_model=MoodleLoginResponse)
-async def moodle_login(
-    user_data: UserLogin, 
-    response: Response,
-    db: Session = Depends(get_db)
-):
-    """
-    Login with Moodle credentials.
-    
-    This endpoint authenticates the user against Moodle,
-    gets a Moodle token, and returns a JWT token for API access.
-    """
-    # Add CORS headers
-    for key, value in CORS_HEADERS.items():
-        response.headers[key] = value
-    
-    # Get Moodle config from database or use default
-    moodle_config = db.query(MoodleConfig).first()
-    base_url = moodle_config.base_url if moodle_config else os.getenv("MOODLE_URL")
-    service = user_data.service or (moodle_config.service_name if moodle_config else "modquest")
-    
-    logger.info(f"Attempting to login with Moodle at {base_url}")
-    
-    # Development mode - bypass Moodle authentication if username contains "dev-"
-    if user_data.username.startswith("dev-"):
-        dev_username = user_data.username[4:]  # Remove "dev-" prefix
-        
-        # Check if user exists
-        user = db.query(User).filter(User.username == dev_username).first()
-        
-        if not user:
-            # Create a development user automatically with properly hashed password
-            dev_password_hash = get_password_hash("development_mode_password")
-            
-            user = User(
-                username=dev_username,
-                email=f"{dev_username}@example.com",
-                password_hash=dev_password_hash,
-                first_name="Development",
-                last_name="User",
-                role="teacher",  # Default to teacher role for dev
-                user_token="dev-token-123"
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-        
-        # Create access & refresh tokens
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": user.username},
-            expires_delta=access_token_expires
-        )
-        
-        refresh_token = create_refresh_token(
-            data={"sub": user.username}
-        )
-        
-        # Store tokens in database
-        store_token(
-            db=db,
-            token=access_token,
-            user_id=user.id,
-            token_type="access",
-            expires_at=datetime.utcnow() + access_token_expires
-        )
-        
-        store_token(
-            db=db,
-            token=refresh_token,
-            user_id=user.id,
-            token_type="refresh",
-            expires_at=datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-        )
-        
-        # Create UserResponse
-        user_response = UserResponse(
-            id=user.id,
-            username=user.username,
-            email=user.email,
-            role=user.role,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            is_active=user.is_active,
-            moodle_user_id=user.moodle_user_id,
-            profile_image_url=user.profile_image_url,
-            bio=user.bio,
-            created_at=user.created_at
-        )
-        
-        return MoodleLoginResponse(
-            success=True,
-            token="dev-token-123",
-            user=user_response
-        )
-    
-    # Initialize Moodle service
-    async with MoodleService(base_url=base_url, verify_ssl=False) as moodle:
-        # Check if user exists and has a valid token
-        user = db.query(User).filter(User.username == user_data.username).first()
-        
-        if user and user.user_token:
-            # User exists and has a token, let's verify if it's still valid
-            is_valid = await validate_moodle_token(user.user_token, moodle)
-            
-            if is_valid:
-                # Token is valid, update user info and proceed with login
-                user_info_result = await moodle.get_user_info(user.user_token)
-                
-                if not user_info_result["success"]:
-                    # Token validated but couldn't get user info - unusual, get a new token
-                    logger.warning(f"Token validated but user info failed: {user_info_result['error']}")
-                else:
-                    # Update user info with the latest from Moodle
-                    moodle_user = user_info_result["user"]
-                    sync_user_from_moodle(user, moodle_user, db)
-                    db.commit()
-                    
-                    # Generate JWT tokens for our API
-                    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-                    access_token = create_access_token(
-                        data={"sub": user.username},
-                        expires_delta=access_token_expires
-                    )
-                    
-                    refresh_token = create_refresh_token(
-                        data={"sub": user.username}
-                    )
-                    
-                    # Store JWT tokens in database
-                    store_token(
-                        db=db,
-                        token=access_token,
-                        user_id=user.id,
-                        token_type="access",
-                        expires_at=datetime.utcnow() + access_token_expires
-                    )
-                    
-                    store_token(
-                        db=db,
-                        token=refresh_token,
-                        user_id=user.id,
-                        token_type="refresh",
-                        expires_at=datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-                    )
-                    
-                    # Create UserResponse
-                    user_response = UserResponse(
-                        id=user.id,
-                        username=user.username,
-                        email=user.email,
-                        role=user.role,
-                        first_name=user.first_name,
-                        last_name=user.last_name,
-                        is_active=user.is_active,
-                        moodle_user_id=user.moodle_user_id,
-                        profile_image_url=user.profile_image_url,
-                        bio=user.bio,
-                        created_at=user.created_at
-                    )
-                    
-                    logger.info(f"User {user.username} logged in successfully with existing token")
-                    return MoodleLoginResponse(
-                        success=True,
-                        token=user.user_token,
-                        user=user_response
-                    )
-        
-        # If we reach here, we need to get a new token from Moodle
-        logger.info(f"Getting new Moodle token for user {user_data.username}")
-        # Get token from Moodle
-        token_result = await moodle.get_token(
-            username=user_data.username, 
-            password=user_data.password,
-            service=service
-        )
-        
-        if token_result.error:
-            logger.error(f"Failed to get token: {token_result.error}")
-            return MoodleLoginResponse(
-                success=False, 
-                error=token_result.error
-            )
-        
-        # Get user info from Moodle
-        user_info_result = await moodle.get_user_info(token_result.token)
-        
-        if not user_info_result["success"]:
-            logger.error(f"Failed to get user info: {user_info_result['error']}")
-            return MoodleLoginResponse(
-                success=False, 
-                error=user_info_result["error"]
-            )
-            
-        # Extract user data
-        moodle_user = user_info_result["user"]
-        
-        # Check if user exists in our database
-        user = db.query(User).filter(User.username == user_data.username).first()
-        
-        if user:
-            # Update existing user with new token and info
-            user.user_token = token_result.token
-            sync_user_from_moodle(user, moodle_user, db)
-        else:
-            # Create new user with all Moodle data
-            role = "student"  # Default role
-            
-            # Determine role from user attributes
-            roles = moodle_user.get("roles", [])
-            if roles:
-                if any(role.get("shortname") == "admin" for role in roles):
-                    role = "admin"
-                elif any(role.get("shortname", "").startswith("teacher") for role in roles):
-                    role = "teacher"
-            
-            # Hash the actual user login password for the password_hash field
-            # This way we store the actual credentials that worked with Moodle
-            password_hash = get_password_hash(user_data.password)
-            
-            user = User(
-                username=user_data.username,
-                email=moodle_user.get("email", ""),
-                password_hash=password_hash,  # Use the hashed login password
-                moodle_user_id=int(moodle_user.get("id", 0)),
-                user_token=token_result.token,
-                first_name=moodle_user.get("firstname", ""),
-                last_name=moodle_user.get("lastname", ""),
-                role=role,
-                created_at=datetime.utcnow()  # Explicitly set creation time
-            )
-            logger.info(f"Created new user {user_data.username} with role {role}")
-            db.add(user)
-            
-        db.commit()
-        db.refresh(user)
-        
-        # Create access & refresh tokens
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": user.username},
-            expires_delta=access_token_expires
-        )
-        
-        refresh_token = create_refresh_token(
-            data={"sub": user.username}
-        )
-        
-        # Store tokens in database
-        store_token(
-            db=db,
-            token=access_token,
-            user_id=user.id,
-            token_type="access",
-            expires_at=datetime.utcnow() + access_token_expires
-        )
-        
-        store_token(
-            db=db,
-            token=refresh_token,
-            user_id=user.id,
-            token_type="refresh",
-            expires_at=datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-        )
-        
-        # Create UserResponse
-        user_response = UserResponse(
-            id=user.id,
-            username=user.username,
-            email=user.email,
-            role=user.role,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            is_active=user.is_active,
-            moodle_user_id=user.moodle_user_id,
-            profile_image_url=user.profile_image_url,
-            bio=user.bio,
-            created_at=user.created_at or datetime.utcnow()
-        )
-        
-        logger.info(f"User {user.username} logged in successfully with new token")
-        # Return token and user info
-        return MoodleLoginResponse(
-            success=True,
-            token=token_result.token,
-            user=user_response
-        )
-    
-    # After successful login (dev or real), log activity
-    if user:
-        log_activity(
-            db=db,
-            user_id=user.id,
-            action_type="login",
-            action_details={"method": "moodle"},
-            related_entity_type="user",
-            related_entity_id=user.id
-        )
-
-
-@router.post("/token", response_model=Token)
-async def login_for_access_token(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db)
-):
-    """
-    Get an access token using username/password (OAuth2 compatible endpoint).
-    """
-    # This is a simplified version - in a real app, you'd verify credentials
-    # against your database or call the Moodle login endpoint
-    user = db.query(User).filter(User.username == form_data.username).first()
-    
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-        
-    # Create tokens
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+# --- helpers ----------------------------------------------------------------
+def _issue_tokens(db: Session, user: User) -> Token:
+    """Create + persist access/refresh tokens and build the Token response."""
+    access_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.username},
-        expires_delta=access_token_expires
+        data={"sub": user.username}, expires_delta=access_expires
     )
-    
-    refresh_token = create_refresh_token(
-        data={"sub": user.username}
-    )
-    
-    # Store tokens
-    store_token(
-        db=db,
-        token=access_token,
-        user_id=user.id,
-        token_type="access",
-        expires_at=datetime.utcnow() + access_token_expires
-    )
-    
-    store_token(
-        db=db,
-        token=refresh_token,
-        user_id=user.id,
-        token_type="refresh",
-        expires_at=datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    )
-    
-    # Create user response
-    user_response = UserResponse(
-        id=user.id,
-        username=user.username,
-        email=user.email,
-        role=user.role,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        is_active=user.is_active,
-        moodle_user_id=user.moodle_user_id,
-        profile_image_url=user.profile_image_url,
-        bio=user.bio,
-        created_at=user.created_at
-    )
-    
+    refresh_token = create_refresh_token(data={"sub": user.username})
+
+    store_token(db, access_token, user.id, "access",
+                _utcnow() + access_expires)
+    store_token(db, refresh_token, user.id, "refresh",
+                _utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
+
+    user.last_login = _utcnow()
+    db.commit()
+
     return Token(
         access_token=access_token,
         token_type="bearer",
         expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         refresh_token=refresh_token,
-        user=user_response
+        user=UserResponse.model_validate(user),
     )
 
 
-@router.get("/me", response_model=UserResponse)
-async def read_users_me(
-    refresh_from_moodle: bool = False,
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Get information about the current authenticated user.
-    
-    Args:
-        refresh_from_moodle: If True, refresh user data from Moodle before returning
-    """
-    if refresh_from_moodle and current_user.user_token:
-        # Get Moodle config
-        moodle_config = db.query(MoodleConfig).first()
-        base_url = moodle_config.base_url if moodle_config else os.getenv("MOODLE_URL")
-        
-        try:
-            # Connect to Moodle and get latest user data
-            async with MoodleService(base_url=base_url, verify_ssl=False) as moodle:
-                is_valid = await validate_moodle_token(current_user.user_token, moodle)
-                
-                if is_valid:
-                    user_info_result = await moodle.get_user_info(current_user.user_token)
-                    
-                    if user_info_result["success"]:
-                        # Update user with latest Moodle data
-                        moodle_user = user_info_result["user"]
-                        sync_user_from_moodle(current_user, moodle_user, db)
-                        db.commit()
-                        logger.info(f"Refreshed user data for {current_user.username} from /me endpoint")
-        except Exception as e:
-            # Log error but don't fail the request
-            logger.error(f"Failed to refresh user data from Moodle: {str(e)}")
-    
-    return UserResponse(
-        id=current_user.id,
-        username=current_user.username,
-        email=current_user.email,
-        role=current_user.role,
-        first_name=current_user.first_name,
-        last_name=current_user.last_name,
-        is_active=current_user.is_active,
-        moodle_user_id=current_user.moodle_user_id,
-        profile_image_url=current_user.profile_image_url,
-        bio=current_user.bio,
-        created_at=current_user.created_at
+def _new_verification_code() -> str:
+    """A 6-digit numeric verification code."""
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _unique_username(db: Session, base: str) -> str:
+    """Derive a unique username from a base string."""
+    candidate = re.sub(r"[^a-zA-Z0-9_.-]", "", base).lower() or "user"
+    candidate = candidate[:90]
+    if not db.query(User).filter(User.username == candidate).first():
+        return candidate
+    while True:
+        suffix = secrets.token_hex(3)
+        new = f"{candidate[:80]}_{suffix}"
+        if not db.query(User).filter(User.username == new).first():
+            return new
+
+
+# --- registration / login ---------------------------------------------------
+def _issue_verification(db: Session, user: User) -> None:
+    """Generate, store, and send a fresh email-verification code."""
+    code = _new_verification_code()
+    user.verification_code = code
+    user.verification_code_expires = _utcnow() + timedelta(
+        minutes=VERIFICATION_CODE_EXPIRE_MINUTES
+    )
+    db.commit()
+    send_verification_code(user.email, code, VERIFICATION_CODE_EXPIRE_MINUTES)
+
+
+@router.post("/register", response_model=RegisterResponse,
+             status_code=status.HTTP_201_CREATED,
+             dependencies=[Depends(_rl_register)])
+async def register(data: RegisterRequest, db: Session = Depends(get_db)):
+    """Self-registration. Creates an unverified student and emails a code."""
+    if db.query(User).filter(User.username == data.username).first():
+        raise HTTPException(status_code=409, detail="Username already taken")
+    if db.query(User).filter(User.email == data.email).first():
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    user = User(
+        username=data.username,
+        email=data.email,
+        password_hash=get_password_hash(data.password),
+        first_name=data.first_name,
+        last_name=data.last_name,
+        role="student",
+        auth_provider="local",
+        is_active=True,
+        is_verified=False,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    _issue_verification(db, user)
+    log_activity(db=db, user_id=user.id, action_type="register",
+                 action_details={"method": "local"},
+                 related_entity_type="user", related_entity_id=user.id)
+    return RegisterResponse(
+        message="Account created. Check your email for a verification code.",
+        email=user.email,
     )
 
 
-@router.get("/config", response_model=MoodleConfigResponse)
-async def get_moodle_config(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_role_required("admin"))
+@router.post("/verify-email", response_model=Token,
+             dependencies=[Depends(_rl_verify)])
+async def verify_email(data: VerifyEmailRequest, db: Session = Depends(get_db)):
+    """Confirm the emailed code; on success verify the account and log in."""
+    user = db.query(User).filter(User.email == data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if user.is_verified:
+        # Already verified — just log them in.
+        return _issue_tokens(db, user)
+    if (not user.verification_code or not user.verification_code_expires
+            or user.verification_code_expires < _utcnow()):
+        raise HTTPException(status_code=400, detail="Code expired. Request a new one.")
+    if data.code.strip() != user.verification_code:
+        raise HTTPException(status_code=400, detail="Incorrect verification code")
+
+    user.is_verified = True
+    user.verification_code = None
+    user.verification_code_expires = None
+    db.commit()
+    return _issue_tokens(db, user)
+
+
+@router.post("/resend-verification", dependencies=[Depends(_rl_resend)])
+async def resend_verification(
+    data: ResendVerificationRequest, db: Session = Depends(get_db)
 ):
-    """Get Moodle configuration (admin only)."""
-    config = db.query(MoodleConfig).first()
-    
-    if not config:
+    """Re-send a verification code. Always returns success (no enumeration)."""
+    user = db.query(User).filter(User.email == data.email).first()
+    if user and not user.is_verified:
+        _issue_verification(db, user)
+    return {"message": "If that account needs verification, a new code was sent."}
+
+
+@router.post("/login", response_model=Token, dependencies=[Depends(_rl_login)])
+async def login(data: LoginRequest, db: Session = Depends(get_db)):
+    """Email/username + password login."""
+    user = db.query(User).filter(
+        or_(User.username == data.username, User.email == data.username)
+    ).first()
+
+    if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+    if not user.is_verified:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Moodle configuration not found"
+            status_code=403,
+            detail="Email not verified. Check your inbox for a verification code.",
         )
-        
-    return config
+
+    log_activity(db=db, user_id=user.id, action_type="login",
+                 action_details={"method": "local"},
+                 related_entity_type="user", related_entity_id=user.id)
+    return _issue_tokens(db, user)
+
+
+@router.post("/google", response_model=Token, dependencies=[Depends(_rl_google)])
+async def google_login(data: GoogleAuthRequest, db: Session = Depends(get_db)):
+    """Sign in / sign up with a Google ID token. New users default to student."""
+    try:
+        claims = verify_google_id_token(data.id_token)
+    except GoogleAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    google_sub = claims["sub"]
+    email = claims["email"]
+
+    user = db.query(User).filter(
+        or_(User.google_id == google_sub, User.email == email)
+    ).first()
+
+    if user:
+        # Link Google to an existing (possibly local) account.
+        if not user.google_id:
+            user.google_id = google_sub
+            user.auth_provider = "both" if user.password_hash else "google"
+        if not user.profile_image_url and claims.get("picture"):
+            user.profile_image_url = claims["picture"]
+        user.is_verified = True  # Google has verified the email
+    else:
+        user = User(
+            username=_unique_username(db, email.split("@")[0]),
+            email=email,
+            password_hash=None,
+            first_name=claims.get("given_name", ""),
+            last_name=claims.get("family_name", ""),
+            role="student",
+            auth_provider="google",
+            google_id=google_sub,
+            profile_image_url=claims.get("picture"),
+            is_active=True,
+            is_verified=True,
+        )
+        db.add(user)
+
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+
+    db.commit()
+    db.refresh(user)
+
+    log_activity(db=db, user_id=user.id, action_type="login",
+                 action_details={"method": "google"},
+                 related_entity_type="user", related_entity_id=user.id)
+    return _issue_tokens(db, user)
+
+
+# --- session management ------------------------------------------------------
+@router.post("/refresh", response_model=Token)
+async def refresh(data: RefreshRequest, db: Session = Depends(get_db)):
+    """Exchange a valid refresh token for a new access/refresh pair."""
+    payload = decode_token(data.refresh_token)
+    if not payload or not payload.get("sub"):
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    from app.models.auth import Token as TokenModel
+    stored = db.query(TokenModel).filter(
+        TokenModel.token == data.refresh_token,
+        TokenModel.token_type == "refresh",
+        TokenModel.revoked == False,
+    ).first()
+    if not stored:
+        raise HTTPException(status_code=401, detail="Refresh token not recognized")
+
+    user = db.query(User).filter(User.username == payload["sub"]).first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="User not found or inactive")
+
+    # Rotate: revoke the used refresh token.
+    revoke_token(db, data.refresh_token)
+    return _issue_tokens(db, user)
 
 
 @router.post("/logout")
 async def logout(
+    data: RefreshRequest | None = None,
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
 ):
-    """Logout the current user by revoking their tokens."""
-    # In a real implementation, you would revoke all tokens for the user
-    # Here we're just returning a success message
+    """Revoke the caller's refresh token (and best-effort all their tokens)."""
+    from app.models.auth import Token as TokenModel
+    db.query(TokenModel).filter(
+        TokenModel.user_id == current_user.id
+    ).update({TokenModel.revoked: True})
+    db.commit()
     return {"message": "Logout successful"}
 
 
-@router.post("/refresh-token", response_model=MoodleLoginResponse)
-async def refresh_moodle_token(
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
-):
+@router.get("/me", response_model=UserResponse)
+async def read_users_me(current_user: User = Depends(get_current_active_user)):
+    """Return the currently authenticated user."""
+    return UserResponse.model_validate(current_user)
+
+
+# --- password recovery -------------------------------------------------------
+@router.post("/forgot-password", dependencies=[Depends(_rl_forgot)])
+async def forgot_password(data: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Issue a password-reset token. Always returns success (no user enumeration).
+
+    NOTE: email delivery is stubbed — the token is logged for development until
+    an SMTP provider is wired.
     """
-    Refresh a user's Moodle token.
-    
-    This is used when the token might be expiring or has expired.
-    """
-    if not current_user.user_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User does not have a Moodle token"
+    user = db.query(User).filter(User.email == data.email).first()
+    if user and user.password_hash is not None:
+        token = secrets.token_urlsafe(32)
+        user.reset_token = token
+        user.reset_token_expires = _utcnow() + timedelta(
+            minutes=RESET_TOKEN_EXPIRE_MINUTES
         )
-    
-    # Get Moodle config
-    moodle_config = db.query(MoodleConfig).first()
-    base_url = moodle_config.base_url if moodle_config else os.getenv("MOODLE_URL")
-    
-    # Check if token is still valid
-    async with MoodleService(base_url=base_url, verify_ssl=False) as moodle:
-        is_valid = await validate_moodle_token(current_user.user_token, moodle)
-        
-        if is_valid:
-            # Token is still valid, no need to refresh but update user info
-            user_info_result = await moodle.get_user_info(current_user.user_token)
-            
-            if user_info_result["success"]:
-                # Update user with latest Moodle data
-                moodle_user = user_info_result["user"]
-                sync_user_from_moodle(current_user, moodle_user, db)
-                db.commit()
-                logger.info(f"Refreshed user data for {current_user.username} from Moodle")
-            
-            # Create UserResponse
-            user_response = UserResponse(
-                id=current_user.id,
-                username=current_user.username,
-                email=current_user.email,
-                role=current_user.role,
-                first_name=current_user.first_name,
-                last_name=current_user.last_name,
-                is_active=current_user.is_active,
-                moodle_user_id=current_user.moodle_user_id,
-                profile_image_url=current_user.profile_image_url,
-                bio=current_user.bio,
-                created_at=current_user.created_at or datetime.utcnow()
-            )
-            
-            return MoodleLoginResponse(
-                success=True,
-                token=current_user.user_token,
-                user=user_response
-            )
-        else:
-            # Token is invalid, we need to get credentials to generate a new one
-            logger.warning(f"Token for user {current_user.username} has expired")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Moodle token has expired. Please login again with username and password."
-            )
-
-
-@router.post("/moodle/store-user", response_model=MoodleLoginResponse)
-async def store_moodle_user(
-    user_data: StoreUserRequest,
-    response: Response,
-    db: Session = Depends(get_db)
-):
-    """
-    Store Moodle user information in the database.
-    
-    This endpoint checks if a user already exists by moodleId or username,
-    and either updates the existing user or creates a new one.
-    """
-    # Add CORS headers
-    for key, value in CORS_HEADERS.items():
-        response.headers[key] = value
-    
-    try:
-        # Check if user already exists by Moodle ID
-        user = db.query(User).filter(User.moodle_user_id == user_data.moodleId).first()
-        if not user:
-            # Also check by username
-            user = db.query(User).filter(User.username == user_data.username).first()
-        
-        if user:
-            # User exists, update their information
-            user.username = user_data.username
-            user.email = user_data.email
-            user.first_name = user_data.firstName
-            user.last_name = user_data.lastName
-            user.moodle_user_id = user_data.moodleId
-            user.user_token = user_data.token
-            user.role = user_data.role or "student"  # Default to student if no role provided
-            
-            # Update profile image if provided
-            if user_data.profileImageUrl:
-                user.profile_image_url = user_data.profileImageUrl
-            
-            # Update bio if provided
-            if hasattr(user_data, 'bio') and user_data.bio is not None:
-                user.bio = user_data.bio
-            
-            # Update last login time
-            user.last_login = datetime.utcnow()
-            
-            logger.info(f"Updated existing user: {user.username} (ID: {user.id})")
-        else:
-            # Create a new user
-            user = User(
-                username=user_data.username,
-                email=user_data.email,
-                first_name=user_data.firstName,
-                last_name=user_data.lastName,
-                moodle_user_id=user_data.moodleId,
-                user_token=user_data.token,
-                role=user_data.role,  # Default role
-                profile_image_url=user_data.profileImageUrl,  # Set profile image
-                bio=getattr(user_data, 'bio', None),
-                is_active=True,
-                password_hash="moodle_user",  # Placeholder as we use Moodle auth
-                created_at=datetime.utcnow()  # Explicitly set creation time
-            )
-            db.add(user)
-            logger.info(f"Created new Moodle user: {user_data.username}")
-        
-        # Commit changes
         db.commit()
-        db.refresh(user)
-        
-        # Generate JWT for API access
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": user.username},
-            expires_delta=access_token_expires
-        )
-        
-        refresh_token = create_refresh_token(
-            data={"sub": user.username}
-        )
-          # Store token
-        store_token(
-            db=db,
-            token=access_token,
-            user_id=user.id,
-            token_type="access",
-            expires_at=datetime.utcnow() + access_token_expires
-        )
-        
-        # Create UserResponse
-        user_response = UserResponse(
-            id=user.id,
-            username=user.username,
-            email=user.email,
-            role=user.role,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            is_active=user.is_active,
-            moodle_user_id=user.moodle_user_id,
-            profile_image_url=user.profile_image_url,
-            bio=user.bio,
-            created_at=user.created_at or datetime.utcnow()
-        )
-        
-        return MoodleLoginResponse(
-            success=True,
-            token=access_token,
-            user=user_response
-        )
-    except Exception as e:
-        logger.error(f"Error storing Moodle user: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to store user: {str(e)}"
-        )
+        logger.info("[DEV] Password reset token for %s: %s", user.email, token)
+    return {"message": "If that email exists, a reset link has been sent."}
 
 
-@router.get("/courses", response_model=dict)
-async def get_user_courses(
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Get courses where the current user is enrolled in from Moodle and store them in the database.
-    
-    This endpoint fetches the user's courses from Moodle using core_enrol_get_users_courses
-    and saves them to our database.
-    """
+@router.post("/reset-password", dependencies=[Depends(_rl_reset)])
+async def reset_password(data: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Consume a reset token and set a new password."""
+    user = db.query(User).filter(User.reset_token == data.token).first()
+    if (not user or not user.reset_token_expires
+            or user.reset_token_expires < _utcnow()):
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    user.password_hash = get_password_hash(data.new_password)
+    user.auth_provider = "both" if user.google_id else "local"
+    user.reset_token = None
+    user.reset_token_expires = None
+    # Force re-login everywhere.
+    from app.models.auth import Token as TokenModel
+    db.query(TokenModel).filter(TokenModel.user_id == user.id).update(
+        {TokenModel.revoked: True}
+    )
+    db.commit()
+    return {"message": "Password updated. Please sign in again."}
+
+
+# --- lightweight public profile ---------------------------------------------
+def _serialize_user_profile(user: User, db: Session, is_privileged: bool) -> dict:
+    """Profile payload + best-effort gamification stats. Shared by GET/PUT."""
+    quests_completed = 0
+    badges_earned = 0
+    current_level = 1
     try:
-        # Get Moodle config
-        moodle_config = db.query(MoodleConfig).first()
-        base_url = moodle_config.base_url if moodle_config else os.getenv("MOODLE_URL")
-        
-        # Check if user has a valid Moodle token
-        if not current_user.user_token:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User does not have a valid Moodle token"
-            )
-            
-        # Initialize Moodle service
-        async with MoodleService(base_url=base_url, verify_ssl=False) as moodle:
-            # Verify token validity
-            is_valid = await validate_moodle_token(current_user.user_token, moodle)
-            
-            if not is_valid:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid or expired Moodle token"
-                )
-            
-            # Get user courses from Moodle
-            if not current_user.moodle_user_id:
-                # First get user info to get Moodle user ID
-                user_info_result = await moodle.get_user_info(current_user.user_token)
-                if not user_info_result["success"]:
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"Failed to get user info from Moodle: {user_info_result['error']}"
-                    )
-                
-                # Update user with Moodle ID
-                moodle_user = user_info_result["user"]
-                if "id" in moodle_user:
-                    current_user.moodle_user_id = int(moodle_user["id"])
-                    db.commit()
-            
-            # Get user courses
-            courses_result = await moodle.get_user_courses(
-                token=current_user.user_token,
-                user_id=str(current_user.moodle_user_id)
-            )
-            
-            if not courses_result["success"]:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to get courses from Moodle: {courses_result['error']}"
-                )
-            
-            # Process and store courses
-            from app.models.course import Course as CourseModel
-            from app.models.enrollment import CourseEnrollment
-            
-            course_ids = []
-            for course_data in courses_result["courses"]:
-                # Check if course already exists
-                course = db.query(CourseModel).filter(CourseModel.moodle_course_id == course_data["id"]).first()
-                
-                if not course:
-                    # Create new course
-                    course = CourseModel(
-                        title=course_data.get("fullname", ""),
-                        description=course_data.get("summary", ""),
-                        short_name=course_data.get("shortname", ""),
-                        course_code=f"MOODLE-{course_data['id']}",
-                        teacher_id=current_user.id,  # Default to current user as teacher
-                        is_active=True,
-                        moodle_course_id=course_data["id"],
-                        format=course_data.get("format", ""),
-                        visible=course_data.get("visible", True)
-                    )
-                    db.add(course)
-                    db.flush()
-                
-                # Add course enrollment if not exists
-                enrollment = db.query(CourseEnrollment).filter(
-                    CourseEnrollment.user_id == current_user.id,
-                    CourseEnrollment.course_id == course.id
-                ).first()
-                
-                if not enrollment:
-                    # Determine role from Moodle course data
-                    role = "student"
-                    if current_user.role == "teacher" or current_user.role == "admin":
-                        role = "teacher"
-                    
-                    enrollment = CourseEnrollment(
-                        user_id=current_user.id,
-                        course_id=course.id,
-                        moodle_enrollment_id=course_data.get("id", None),
-                        role=role,
-                        status="active",
-                        last_access=datetime.utcnow()
-                    )
-                    db.add(enrollment)
-                else:
-                    # Update last access time
-                    enrollment.last_access = datetime.utcnow()
-                
-                course_ids.append(course.id)
-            
-            # Commit all changes
-            db.commit()
-            
-            # Fetch all courses the user is enrolled in
-            enrollments = db.query(CourseEnrollment).filter(
-                CourseEnrollment.user_id == current_user.id
-            ).all()
-            
-            enrolled_course_ids = [enrollment.course_id for enrollment in enrollments]
-            
-            courses = db.query(CourseModel).filter(CourseModel.id.in_(enrolled_course_ids)).all()
-            
-            # Convert to dict for response
-            courses_data = []
-            for course in courses:
-                courses_data.append({
-                    "id": course.id,
-                    "title": course.title,
-                    "short_name": course.short_name,
-                    "description": course.description,
-                    "moodle_course_id": course.moodle_course_id,
-                    "is_active": course.is_active
-                })
-            
-            return {
-                "success": True,
-                "courses": courses_data,
-                "message": f"Successfully fetched and stored {len(courses_data)} courses"
-            }
-    
-    except Exception as e:
-        logger.error(f"Error in get_user_courses: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get user courses: {str(e)}"
-        )
+        from app.models.quest import QuestProgress
+        from app.models.badge import UserBadge
+        from app.models.virtual_pet import VirtualPet
 
-
-@router.get("/debug-headers")
-async def debug_headers(request: Request):
-    """Debug endpoint to check what headers are being received"""
-    return {
-        "cookies": dict(request.cookies),
-        "authorization_header": request.headers.get("Authorization"),
-        "all_headers": dict(request.headers)
-    }
-
-@router.get("/get-activities", response_model=dict)
-async def get_activities(
-    request: Request,
-    course_ids: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """
-    Fetch all available activities (assignments, quizzes, lessons, forums, etc.) from Moodle using core_course_get_contents.
-    Each activity will include an 'is_assigned' boolean indicating if it is already tied to a quest.
-    Activities are categorized into 'Active' (not yet due) and 'Due/Overdue' (past due date) sections.
-    This allows the frontend to filter for assigned, unassigned, or all activities with clear categorization.
-    """
-    import requests
-    token = request.cookies.get("moodleToken")
-    
-    # Debug logging
-    logger.info(f"Cookie moodleToken: {token}")
-    auth_header = request.headers.get("Authorization")
-    logger.info(f"Authorization header: {auth_header}")
-    
-    # If not in cookies, try Authorization header as fallback
-    if not token:
-        if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header.replace("Bearer ", "")
-            logger.info(f"Extracted token from Authorization header: {token[:10]}...")
-    
-    if not token:
-        logger.warning("No token found in cookies or Authorization header")
-        raise HTTPException(status_code=401, detail="No Moodle token found in cookies or Authorization header. Please login first.")
-
-    # Get Moodle config
-    moodle_config = db.query(MoodleConfig).first()
-    base_url = moodle_config.base_url if moodle_config else os.getenv("MOODLE_URL")
-    base_url = base_url.rstrip("/")
-
-    # Determine course IDs
-    if course_ids:
-        try:
-            course_id_list = [int(cid.strip()) for cid in course_ids.split(",") if cid.strip()]
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid course_ids format. Use comma-separated integers.")
-    else:
-        # Get all courses for the user from Moodle
-        user_info_params = {
-            "wstoken": token,
-            "wsfunction": "core_webservice_get_site_info",
-            "moodlewsrestformat": "json"
-        }
-        user_info_url = f"{base_url}/webservice/rest/server.php"
-        user_info_resp = requests.get(user_info_url, params=user_info_params, verify=False)
-        user_info = user_info_resp.json()
-        if "exception" in user_info:
-            raise HTTPException(status_code=401, detail="Invalid or expired Moodle token")
-        user_id = user_info.get("userid")
-        if not user_id:
-            raise HTTPException(status_code=500, detail="Could not get user ID from Moodle token")
-        # Now get the courses for this user
-        course_params = {
-            "wstoken": token,
-            "wsfunction": "core_enrol_get_users_courses",
-            "userid": user_id,
-            "moodlewsrestformat": "json"
-        }
-        url = f"{base_url}/webservice/rest/server.php"
-        response = requests.get(url, params=course_params, verify=False)
-        courses_result = response.json()
-        if isinstance(courses_result, dict) and "exception" in courses_result:
-            raise HTTPException(status_code=400, detail=f"Moodle API error: {courses_result.get('message', 'Unknown error')}")
-        if not isinstance(courses_result, list):
-            raise HTTPException(status_code=500, detail="Unexpected response format from Moodle API")
-        course_id_list = [course.get("id") for course in courses_result if isinstance(course, dict) and course.get("id")]
-
-    # Get all assigned moodle_activity_id values from quests table
-    from app.models.quest import Quest
-    assigned_ids = set(row[0] for row in db.query(Quest.moodle_activity_id).filter(Quest.moodle_activity_id != None).all())
-
-    # Initialize activity lists
-    activities = []
-    assignments = []
-    quizzes = []
-    lessons = []
-    forums = []
-    others = []
-    
-    # Initialize categorized lists for active vs due activities
-    active_activities = []
-    due_activities = []
-    
-    # Get current timestamp for comparison
-    from datetime import datetime
-    current_timestamp = int(datetime.now().timestamp())
-
-    # Categorized activities
-    active_activities = []
-    due_activities = []
-
-    # Get current timestamp for comparison
-    from datetime import datetime
-    current_timestamp = datetime.utcnow().timestamp()
-
-    for course_id in course_id_list:
-        params = {
-            "wstoken": token,
-            "wsfunction": "core_course_get_contents",
-            "courseid": course_id,
-            "moodlewsrestformat": "json"
-        }
-        url = f"{base_url}/webservice/rest/server.php"
-        try:
-            resp = requests.get(url, params=params, verify=False)
-            course_contents = resp.json()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch from Moodle: {str(e)}")
-
-        # Parse course_contents for activities
-        if not isinstance(course_contents, list):
-            logger.warning(f"Unexpected course contents format for course {course_id}: {course_contents}")
-            continue
-            
-        for section in course_contents:
-            if not isinstance(section, dict):
-                continue
-            for mod in section.get("modules", []):
-                # Extract due date from various sources
-                due_timestamp = None
-                is_overdue = False
-                
-                # Check for due date in dates array
-                dates = mod.get("dates", [])
-                for date_info in dates:
-                    if date_info.get("dataid") == "duedate":
-                        due_timestamp = date_info.get("timestamp")
-                        break
-                
-                # Check for due date in customdata (JSON string)
-                if not due_timestamp:
-                    customdata = mod.get("customdata", "")
-                    if customdata:
-                        try:
-                            import json
-                            data = json.loads(customdata)
-                            due_timestamp = data.get("duedate")
-                        except:
-                            pass
-                
-                # Determine if activity is overdue
-                if due_timestamp:
-                    is_overdue = current_timestamp >= due_timestamp
-                
-                activity = {
-                    "id": mod.get("id"),
-                    "name": mod.get("name"),
-                    "modname": mod.get("modname"),
-                    "instance": mod.get("instance"),
-                    "course": course_id,
-                    "description": mod.get("description", ""),
-                    "type": mod.get("modname"),
-                    "is_assigned": mod.get("id") in assigned_ids,
-                    "due_timestamp": due_timestamp if due_timestamp else 0,
-                    "is_overdue": is_overdue,
-                    "raw": mod
-                }
-                
-                activities.append(activity)
-                
-                # Categorize by due status (only for assigned activities with due dates)
-                if activity["is_assigned"] and due_timestamp:
-                    if is_overdue:
-                        due_activities.append(activity)
-                    else:
-                        active_activities.append(activity)
-                elif activity["is_assigned"] and not due_timestamp:
-                    # Activities without due dates go to active by default
-                    active_activities.append(activity)
-                
-                # Categorize by type
-                if mod.get("modname") == "assign":
-                    assignments.append(activity)
-                elif mod.get("modname") == "quiz":
-                    quizzes.append(activity)
-                elif mod.get("modname") == "lesson":
-                    lessons.append(activity)
-                elif mod.get("modname") == "forum":
-                    forums.append(activity)
-                else:
-                    others.append(activity)
-
-    # Sort due activities by due date (most overdue first)
-    due_activities.sort(key=lambda x: x.get("due_timestamp", 0))
-    
-    # Sort active activities by due date (earliest due first, but activities without due dates go last)
-    active_activities.sort(key=lambda x: x.get("due_timestamp", 0) if x.get("due_timestamp", 0) > 0 else float('inf'))
+        quests_completed = db.query(QuestProgress).filter(
+            QuestProgress.user_id == user.id,
+            QuestProgress.status == "completed",
+        ).count()
+        badges_earned = db.query(UserBadge).filter(
+            UserBadge.user_id == user.id
+        ).count()
+        pet = db.query(VirtualPet).filter(VirtualPet.user_id == user.id).first()
+        current_level = pet.level if pet else 1
+    except Exception as exc:  # noqa: BLE001 - stats are best-effort
+        logger.error("Error getting user stats: %s", exc)
 
     return {
-        "success": True,
-        "active_activities": active_activities,
-        "due_activities": due_activities,
-        "assignments": assignments,
-        "quizzes": quizzes,
-        "lessons": lessons,
-        "forums": forums,
-        "others": others,
-        "activities": activities,
-        "count": len(activities),
-        "active_count": len(active_activities),
-        "due_count": len(due_activities)
+        "id": user.id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "email": user.email if is_privileged else None,
+        "profile_image_url": user.profile_image_url,
+        "role": user.role,
+        "bio": user.bio,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "current_level": current_level,
+        "badges_earned": badges_earned,
+        "quests_completed": quests_completed,
     }
-
-
-@router.get("/get-course")
-async def get_course(
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    """
-    Fetch course details from Moodle using the token from cookies.
-    Uses the Moodle user ID associated with the token.
-    Also saves/updates the fetched courses to the local database.
-    """
-    token = request.cookies.get("moodleToken")
-    
-    # If not in cookies, try Authorization header as fallback
-    if not token:
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header.replace("Bearer ", "")
-    
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail="No Moodle token found in cookies or Authorization header. Please login first."
-        )
-
-    # Get Moodle config
-    moodle_config = db.query(MoodleConfig).first()
-    base_url = moodle_config.base_url if moodle_config else os.getenv("MOODLE_URL")
-    base_url = base_url.rstrip("/")
-
-    try:
-        # First get user info to get Moodle user ID
-        user_info_params = {
-            "wstoken": token,
-            "wsfunction": "core_webservice_get_site_info",
-            "moodlewsrestformat": "json"
-        }
-        user_info_url = f"{base_url}/webservice/rest/server.php"
-        user_info_resp = requests.get(user_info_url, params=user_info_params, verify=False)
-        user_info = user_info_resp.json()
-
-        if "exception" in user_info:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid or expired Moodle token"
-            )
-
-        user_id = user_info.get("userid")
-        if not user_id:
-            raise HTTPException(
-                status_code=500,
-                detail="Could not get user ID from Moodle token"
-            )
-
-        # Now get the courses for this user
-        course_params = {
-            "wstoken": token,
-            "wsfunction": "core_enrol_get_users_courses",
-            "userid": user_id,
-            "moodlewsrestformat": "json"
-        }
-
-        url = f"{base_url}/webservice/rest/server.php"
-        response = requests.get(url, params=course_params, verify=False)
-        courses_result = response.json()
-
-        # Check for Moodle API errors
-        if isinstance(courses_result, dict) and "exception" in courses_result:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Moodle API error: {courses_result.get('message', 'Unknown error')}"
-            )
-
-        # Process and format the courses
-        courses = []
-        from app.models.course import Course as CourseModel
-        for course in courses_result:
-            # Upsert logic: check if course exists by moodle_course_id
-            db_course = db.query(CourseModel).filter(CourseModel.moodle_course_id == course.get("id")).first()
-            if db_course:
-                # Update existing course
-                db_course.title = course.get("fullname", db_course.title)
-                db_course.short_name = course.get("shortname", db_course.short_name)
-                db_course.description = course.get("summary", db_course.description)
-                db_course.format = course.get("format", db_course.format)
-                db_course.visible = course.get("visible", db_course.visible)
-                db_course.is_active = True
-            else:
-                # Insert new course
-                db_course = CourseModel(
-                    title=course.get("fullname", ""),
-                    short_name=course.get("shortname", ""),
-                    description=course.get("summary", ""),
-                    course_code=f"MOODLE-{course.get('id')}",
-                    teacher_id=1,  # Default teacher_id, adjust as needed
-                    is_active=True,
-                    moodle_course_id=course.get("id"),
-                    format=course.get("format", ""),
-                    visible=course.get("visible", True)
-                )
-                db.add(db_course)
-            courses.append({
-                "id": course.get("id"),
-                "fullname": course.get("fullname"),
-                "shortname": course.get("shortname"),
-                "categoryid": course.get("category"),
-                "summary": course.get("summary", ""),
-                "format": course.get("format"),
-                "startdate": course.get("startdate"),
-                "enddate": course.get("enddate"),
-                "visible": course.get("visible", True),
-                "raw": course
-            })
-        db.commit()
-
-        return {
-            "success": True,
-            "courses": courses,
-            "count": len(courses),
-            "message": f"Fetched and saved {len(courses)} courses to the local database."
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to fetch or save courses from Moodle: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch or save courses from Moodle: {str(e)}"
-        )
 
 
 @router.get("/users/{user_id}/profile")
 async def get_user_profile(
     user_id: int,
-    username: str = None,
     current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """
-    Get basic profile information for a specific user.
-    """
-    try:
-        # First try to find by Moodle user ID, then by local ID
-        user = db.query(User).filter(User.moodle_user_id == user_id).first()
-        if not user:
-            user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-        # Get additional stats from related tables
-        try:
-            from app.models.quest import QuestProgress
-            from app.models.badge import UserBadge
-            from app.models.virtual_pet import VirtualPet
-            
-            # Count completed quests
-            quests_completed = db.query(QuestProgress).filter(
-                QuestProgress.user_id == user.id,
-                QuestProgress.status == "completed"
-            ).count()
-            
-            # Count badges earned
-            badges_earned = db.query(UserBadge).filter(
-                UserBadge.user_id == user.id
-            ).count()
-            
-            # Get current level from virtual pet or default to 1
-            virtual_pet = db.query(VirtualPet).filter(VirtualPet.user_id == user.id).first()
-            current_level = virtual_pet.level if virtual_pet else 1
-        except Exception as e:
-            logger.error(f"Error getting user stats: {str(e)}")
-            # Use defaults if there's an error
-            quests_completed = 0
-            badges_earned = 0
-            current_level = 1
-        
-        profile_data = {
-            "id": user.id,
-            "username": user.username,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "email": user.email,
-            "profile_image_url": user.profile_image_url,
-            "role": user.role,
-            "bio": user.bio,
-            "created_at": user.created_at.isoformat() if user.created_at else None,
-            "current_level": current_level,
-            "badges_earned": badges_earned,
-            "quests_completed": quests_completed,
-        }
-        return {"success": True, "data": profile_data}
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"DEBUG PROFILE ENDPOINT ERROR: {e}")
-        logger.error(f"Error getting user profile: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to get user profile"
-        )
+    """Basic profile + gamification stats for a user."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
+    # Email is PII — only expose it to the user themselves or to staff.
+    is_privileged = (
+        current_user.id == user.id or current_user.role in ("teacher", "admin")
+    )
+    return {"success": True, "data": _serialize_user_profile(user, db, is_privileged)}
+
+
+@router.put("/users/{user_id}/profile")
+async def update_user_profile(
+    user_id: int,
+    data: UpdateProfileRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Update editable profile fields. Only the user (or an admin) may edit."""
+    if current_user.id != user_id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="You can only edit your own profile")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if data.first_name is not None:
+        user.first_name = data.first_name.strip()
+    if data.last_name is not None:
+        user.last_name = data.last_name.strip()
+    if data.bio is not None:
+        user.bio = data.bio.strip()
+
+    db.commit()
+    db.refresh(user)
+    return {"success": True, "data": _serialize_user_profile(user, db, True)}
+
+
+@router.post("/change-email/request")
+async def request_email_change(
+    data: ChangeEmailRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Start a verified email change: email a code to the *new* address.
+
+    The address is not changed until the code is confirmed. Google-only
+    accounts can't change email here (their email comes from Google).
+    """
+    new_email = data.new_email.strip().lower()
+
+    if current_user.auth_provider == "google" and not current_user.password_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Your email is managed by Google and can't be changed here.",
+        )
+    if new_email == (current_user.email or "").lower():
+        raise HTTPException(status_code=400, detail="That's already your email address.")
+
+    clash = db.query(User).filter(
+        func.lower(User.email) == new_email, User.id != current_user.id
+    ).first()
+    if clash:
+        raise HTTPException(status_code=409, detail="That email is already in use.")
+
+    code = _new_verification_code()
+    current_user.pending_email = new_email
+    current_user.email_change_code = code
+    current_user.email_change_expires = _utcnow() + timedelta(
+        minutes=VERIFICATION_CODE_EXPIRE_MINUTES
+    )
+    db.commit()
+    send_email_change_code(new_email, code, VERIFICATION_CODE_EXPIRE_MINUTES)
+    return {
+        "success": True,
+        "message": f"A verification code was sent to {new_email}.",
+    }
+
+
+@router.post("/change-email/confirm")
+async def confirm_email_change(
+    data: ConfirmEmailChangeRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Confirm a pending email change with the code sent to the new address."""
+    if not current_user.pending_email or not current_user.email_change_code:
+        raise HTTPException(status_code=400, detail="No email change is pending.")
+    if (not current_user.email_change_expires
+            or current_user.email_change_expires < _utcnow()):
+        current_user.pending_email = None
+        current_user.email_change_code = None
+        current_user.email_change_expires = None
+        db.commit()
+        raise HTTPException(status_code=400, detail="Code expired. Start over.")
+    if data.code.strip() != current_user.email_change_code:
+        raise HTTPException(status_code=400, detail="Incorrect verification code.")
+
+    new_email = current_user.pending_email
+    # Re-check uniqueness in case the address was taken since the request.
+    clash = db.query(User).filter(
+        func.lower(User.email) == new_email.lower(), User.id != current_user.id
+    ).first()
+    if clash:
+        current_user.pending_email = None
+        current_user.email_change_code = None
+        current_user.email_change_expires = None
+        db.commit()
+        raise HTTPException(status_code=409, detail="That email is already in use.")
+
+    current_user.email = new_email
+    current_user.is_verified = True  # the new address is now proven
+    current_user.pending_email = None
+    current_user.email_change_code = None
+    current_user.email_change_expires = None
+    db.commit()
+    db.refresh(current_user)
+    return {"success": True, "data": _serialize_user_profile(current_user, db, True)}

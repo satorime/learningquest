@@ -4,7 +4,7 @@ import Link from "next/link"
 import { motion } from "framer-motion"
 import { Button } from "@/components/ui/button"
 import { ArrowLeft, BookOpen } from "lucide-react"
-import { SimplifiedMoodleForm } from "@/components/auth/simplified-moodle-form"
+import { SignInForm } from "@/components/auth/sign-in-form"
 import { useState, useEffect } from "react"
 
 export default function SignInPage() {
@@ -103,27 +103,29 @@ export default function SignInPage() {
           >
             <div className="flex items-center justify-center gap-2">
               <BookOpen className="h-6 w-6 text-primary" />
-              <h1 className="text-3xl font-bold tracking-tight">MoodleQuest</h1>
+              <h1 className="text-3xl font-bold tracking-tight">LearningQuest</h1>
             </div>
-            <h2 className="text-xl font-semibold mt-1">Moodle Sign In</h2>
+            <h2 className="text-xl font-semibold mt-1">Welcome back</h2>
             <p className="text-sm text-muted-foreground">
-              Use your Moodle credentials to continue
+              Sign in to continue your learning journey
             </p>
           </motion.div>
 
           <motion.div variants={itemVariants}>
             <div className="bg-background/80 backdrop-blur-sm p-5 rounded-xl border shadow-sm">
-              <SimplifiedMoodleForm />
+              <SignInForm />
             </div>
           </motion.div>
 
-          <motion.div 
+          <motion.div
             variants={itemVariants}
-            className="mt-4 px-3 py-2 bg-blue-50 dark:bg-blue-950/30 rounded-lg border border-blue-100 dark:border-blue-900 text-xs"
+            className="mt-4 text-center text-sm text-muted-foreground"
           >
-            <p className="text-blue-700 dark:text-blue-300 font-medium">MoodleQuest Integration</p>
-            <p className="text-blue-600/80 dark:text-blue-400/80 text-[11px] mt-0.5">
-              Connects directly with your institution's Moodle system
+            <p>
+              Don&apos;t have an account?{" "}
+              <Link href="/register" className="underline underline-offset-4 hover:text-primary">
+                Create one
+              </Link>
             </p>
           </motion.div>
         </div>

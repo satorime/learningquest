@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
-import { useAppToast } from "@/hooks/use-react-hot-toast";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { useNotify } from "@/components/ui/notify-dialog";
 import {
   Card,
   CardContent,
@@ -36,11 +37,17 @@ import {
   getAvailableAccessories,
   equipAccessory,
   getEquippedAccessories,
+  feedPet,
+  playWithPet,
   VirtualPetData,
   updatePetName,
 } from "@/lib/virtual-pet-api";
 
-
+// Stat-decay rates. These MUST match the backend (HAPPINESS_DECAY_PER_HOUR /
+// ENERGY_DECAY_PER_HOUR in routes/virtual_pet.py) so the live display stays in
+// sync with what the server persists across logout/login.
+const HAPPINESS_DECAY_PER_HOUR = 5;
+const ENERGY_DECAY_PER_HOUR = 3;
 
 // Mock pet data
 const mockPet: VirtualPetType = {
@@ -59,7 +66,16 @@ const mockPet: VirtualPetType = {
 };
 
 export function VirtualPet() {
-  const { success, error: showError } = useAppToast();
+  const confirm = useConfirm();
+  const notify = useNotify();
+  const success = useCallback(
+    (msg: string) => notify({ variant: "success", description: msg }),
+    [notify]
+  );
+  const showError = useCallback(
+    (msg: string) => notify({ variant: "error", description: msg }),
+    [notify]
+  );
 
   // State for loading and error handling
   const [isLoading, setIsLoading] = useState(true);
@@ -70,6 +86,7 @@ export function VirtualPet() {
   >([]);
   const [equippedAccessories, setEquippedAccessories] = useState<any[]>([]);
   const [userLevel, setUserLevel] = useState<number>(1);
+  const [food, setFood] = useState<number>(0);
 
   const [activeTab, setActiveTab] = useState("interact");
   const [showAccessories, setShowAccessories] = useState(false);
@@ -94,8 +111,8 @@ export function VirtualPet() {
       name: backendPet.name,
       species: backendPet.species,
       level: backendPet.level || 1, // Use synchronized level from backend
-      experience: 0, // No longer used for pet leveling
-      experienceToNextLevel: 0, // No longer used for pet leveling
+      experience: backendPet.exp_into_level ?? 0, // XP earned within the current level
+      experienceToNextLevel: backendPet.exp_for_next_level ?? 0, // XP needed to reach the next level
       happiness: backendPet.happiness,
       energy: backendPet.energy,
       lastFed: backendPet.last_fed,
@@ -131,6 +148,7 @@ export function VirtualPet() {
           const frontendPet = convertBackendPetToFrontend(petResponse.pet);
           setPet(frontendPet);
           setNewPetName(frontendPet.name);
+          setFood(petResponse.pet.food ?? 0);
           // console.log("VirtualPet: Successfully loaded pet:", frontendPet);
         } else if (petResponse.success && !petResponse.has_pet) {
           // User doesn't have a pet - this component shouldn't be shown
@@ -169,6 +187,21 @@ export function VirtualPet() {
     fetchPetData();
   }, []);
 
+  // Refresh food when another part of the app reports it changed (e.g. a daily
+  // quest or quiz just granted food).
+  useEffect(() => {
+    const onFoodChanged = async () => {
+      try {
+        const res = await getMyPet();
+        if (res.success && res.pet) setFood(res.pet.food ?? 0);
+      } catch {
+        /* best-effort */
+      }
+    };
+    window.addEventListener("pet:food-changed", onFoodChanged);
+    return () => window.removeEventListener("pet:food-changed", onFoodChanged);
+  }, []);
+
   // Sync pet level periodically
   useEffect(() => {
     const syncLevel = async () => {
@@ -190,11 +223,20 @@ export function VirtualPet() {
             });
           }
 
-          // Show notification for level ups
+          // Celebrate level ups with a center-screen popup (see LevelUpListener).
           if (syncResponse.level_ups > 0) {
-            success(
-              `🎉 Your pet leveled up to level ${syncResponse.new_level}!`
-            );
+            try {
+              window.dispatchEvent(
+                new CustomEvent("level:up", {
+                  detail: {
+                    level: syncResponse.new_level,
+                    levelsGained: syncResponse.level_ups,
+                  },
+                })
+              );
+            } catch {
+              /* ignore */
+            }
           }
 
           // Show notification for new accessories
@@ -235,22 +277,37 @@ export function VirtualPet() {
   };
 
   // Handle Feed Pet button click
-  const handleFeedClick = () => {
-    if (!pet || pet.energy >= 100) return; // Don't feed if energy is full or no pet
+  const handleFeedClick = async () => {
+    if (!pet || pet.energy >= 100 || isFeeding) return; // Don't feed if energy is full or no pet
+    if (food <= 0) {
+      showError("No food — earn some by completing quizzes and daily quests.");
+      return;
+    }
 
     setIsFeeding(true);
     const previousState = petState;
 
-    // Update pet stats
-    setPet((prevPet) => {
-      if (!prevPet) return prevPet;
-      return {
-        ...prevPet,
-        energy: Math.min(100, prevPet.energy + 20),
-        lastFed: new Date().toISOString(),
-        // No longer gain experience for pet leveling
-      };
-    });
+    // Persist to the backend and adopt the authoritative stats it returns.
+    try {
+      const res = await feedPet();
+      if (res.success && res.pet_stats) {
+        setPet((prevPet) =>
+          prevPet
+            ? {
+                ...prevPet,
+                energy: res.pet_stats!.energy,
+                happiness: res.pet_stats!.happiness,
+                lastFed: new Date().toISOString(),
+              }
+            : prevPet
+        );
+        if (typeof res.pet_stats.food === "number") setFood(res.pet_stats.food);
+      } else if (!res.success) {
+        showError(res.message || "Failed to feed pet");
+      }
+    } catch {
+      showError("Failed to feed pet");
+    }
 
     // Clear any existing timeout
     if (feedingTimeout.current) {
@@ -266,23 +323,32 @@ export function VirtualPet() {
   };
 
   // Handle Play button click
-  const handlePlayClick = () => {
-    if (!pet || pet.energy <= 0) return; // Don't play if no energy or no pet
+  const handlePlayClick = async () => {
+    if (!pet || pet.energy <= 0 || isPlaying) return; // Don't play if no energy or no pet
 
     setIsPlaying(true);
     const previousState = petState;
 
-    // Update pet stats
-    setPet((prevPet) => {
-      if (!prevPet) return prevPet;
-      return {
-        ...prevPet,
-        happiness: Math.min(100, prevPet.happiness + 15),
-        energy: Math.max(0, prevPet.energy - 10),
-        lastPlayed: new Date().toISOString(),
-        // No longer gain experience for pet leveling
-      };
-    });
+    // Persist to the backend and adopt the authoritative stats it returns.
+    try {
+      const res = await playWithPet();
+      if (res.success && res.pet_stats) {
+        setPet((prevPet) =>
+          prevPet
+            ? {
+                ...prevPet,
+                happiness: res.pet_stats!.happiness,
+                energy: res.pet_stats!.energy,
+                lastPlayed: new Date().toISOString(),
+              }
+            : prevPet
+        );
+      } else if (!res.success) {
+        showError(res.message || "Failed to play with pet");
+      }
+    } catch {
+      showError("Failed to play with pet");
+    }
 
     // Clear any existing timeout
     if (playingTimeout.current) {
@@ -313,6 +379,13 @@ export function VirtualPet() {
       setIsEditingName(false);
       return;
     }
+
+    const ok = await confirm({
+      title: "Rename your pet?",
+      description: `Change your pet's name to "${newPetName.trim()}"?`,
+      confirmText: "Rename",
+    });
+    if (!ok) return;
 
     try {
       setIsUpdatingName(true);
@@ -479,15 +552,17 @@ export function VirtualPet() {
     }
   }, [pet?.happiness, pet?.energy]);
 
-  // Simulate pet stats decreasing over time
+  // Simulate pet stats decreasing over time, at the same hourly rate the
+  // backend uses. The server is authoritative (it recomputes decay from the
+  // stored timestamp on next load); this just keeps the live view moving.
   useEffect(() => {
     const interval = setInterval(() => {
       setPet((prevPet) => {
         if (!prevPet) return prevPet;
         return {
           ...prevPet,
-          happiness: Math.max(0, prevPet.happiness - 1),
-          energy: Math.max(0, prevPet.energy - 0.5),
+          happiness: Math.max(0, prevPet.happiness - HAPPINESS_DECAY_PER_HOUR / 60),
+          energy: Math.max(0, prevPet.energy - ENERGY_DECAY_PER_HOUR / 60),
         };
       });
     }, 60000); // Update every minute
@@ -506,7 +581,7 @@ export function VirtualPet() {
   // Get the appropriate animation source based on current state
   const getPetAnimationSrc = () => {
     if (isFeeding) return "/animations/Happy.gif";
-    if (isPlaying) return "/animations/Tickle.gif";
+    if (isPlaying) return "/animations/Dancing.gif";
 
     switch (petState) {
       case "idle":
@@ -711,6 +786,15 @@ export function VirtualPet() {
       </Card>
     );
   }
+
+  // Percentage of XP earned toward the next level (drives the level bar fill).
+  const expProgressPercent =
+    pet.experienceToNextLevel > 0
+      ? Math.min(
+          100,
+          Math.round((pet.experience / pet.experienceToNextLevel) * 100)
+        )
+      : 0;
 
   return (
     <Card>
@@ -967,22 +1051,19 @@ export function VirtualPet() {
                     <path d="M12 2c-5.5 0-10 4.5-10 10s4.5 10 10 10 10-4.5 10-10-4.5-10-10-10zm0 18c-4.4 0-8-3.6-8-8s3.6-8 8-8 8 3.6 8 8-3.6 8-8 8z" />
                     <path d="M15 6h-6v12h6v-12z" />
                   </svg>
-                  <span>Level</span>
+                  <span>Level {pet.level}</span>
                 </div>
-                <span>{pet.level}</span>
+                <span>
+                  {pet.experienceToNextLevel > 0
+                    ? `${pet.experience} / ${pet.experienceToNextLevel} XP (${expProgressPercent}%)`
+                    : "Max"}
+                </span>
               </div>
 
               <Progress
-                value={100} // Pet level is now synchronized with user level
+                value={expProgressPercent}
                 className="h-2 bg-purple-100 dark:bg-purple-900/20"
-              >
-                <div
-                  className="bg-gradient-to-r from-purple-500 to-purple-700 h-full transition-all"
-                  style={{
-                    width: "100%",
-                  }}
-                />
-              </Progress>
+              />
             </div>
 
             <div className="space-y-1">
@@ -991,9 +1072,9 @@ export function VirtualPet() {
                   <Heart className="h-4 w-4 mr-1 text-red-500" />
                   <span>Happiness</span>
                 </div>
-                <span>{pet.happiness}%</span>
+                <span>{Math.round(pet.happiness)}%</span>
               </div>
-              <Progress value={pet.happiness} className="h-2" />
+              <Progress value={Math.round(pet.happiness)} className="h-2" />
             </div>
 
             <div className="space-y-1">
@@ -1002,9 +1083,9 @@ export function VirtualPet() {
                   <Zap className="h-4 w-4 mr-1 text-yellow-500" />
                   <span>Energy</span>
                 </div>
-                <span>{pet.energy}%</span>
+                <span>{Math.round(pet.energy)}%</span>
               </div>
-              <Progress value={pet.energy} className="h-2" />
+              <Progress value={Math.round(pet.energy)} className="h-2" />
             </div>
           </div>
         </div>
@@ -1034,10 +1115,20 @@ export function VirtualPet() {
           </TabsList>
 
           <TabsContent value="interact" className="space-y-2 pt-2">
+            <div className="mb-2 flex items-center justify-center gap-1.5 text-sm">
+              <span aria-hidden>🍖</span>
+              <span className="font-medium">{food}</span>
+              <span className="text-muted-foreground">food</span>
+            </div>
+            {food <= 0 && (
+              <p className="mb-1 text-center text-xs text-muted-foreground">
+                Out of food — complete quizzes and daily quests to earn more.
+              </p>
+            )}
             <div className="grid grid-cols-2 gap-2">
               <Button
                 onClick={handleFeedClick}
-                disabled={pet.energy >= 100 || isFeeding}
+                disabled={pet.energy >= 100 || isFeeding || food <= 0}
               >
                 Feed Pet
               </Button>

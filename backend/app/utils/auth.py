@@ -9,15 +9,15 @@ from app.database.connection import get_db
 from app.models.user import User
 from app.models.auth import Token as TokenModel
 from app.schemas.auth import TokenData
+from app.config import (
+    SECRET_KEY,
+    ALGORITHM,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    REFRESH_TOKEN_EXPIRE_DAYS,
+)
 import logging
 
 logger = logging.getLogger(__name__)
-
-# Secret key for JWT - should be loaded from environment in production
-SECRET_KEY = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -76,8 +76,16 @@ def create_refresh_token(data: dict) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
+def decode_token(token: str) -> Optional[dict]:
+    """Decode and validate a JWT, returning its payload or None if invalid."""
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+
+
 async def get_current_user(
-    token: str = Depends(oauth2_scheme), 
+    token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ) -> User:
     """
@@ -90,80 +98,45 @@ async def get_current_user(
     Returns:
         Current user or raises an exception
     """
-    # ===========================================================================
-    # TEMPORARY MODIFICATION FOR DEVELOPMENT: Bypassing authentication
-    # This code automatically returns a dummy teacher user without authentication.
-    # REMEMBER TO RESTORE THE ORIGINAL CODE WHEN AUTHENTICATION IS NEEDED AGAIN.
-    # ===========================================================================
-    
-    # Look for an existing teacher user
-    dummy_user = db.query(User).filter(User.role == "teacher").first()
-    
-    # If no teacher user exists, create one
-    if not dummy_user:
-        dummy_user = User(
-            username="dev-teacher",
-            email="dev-teacher@example.com",
-            password_hash=get_password_hash("password"),  # Using a simple password for development
-            first_name="Development",
-            last_name="Teacher",
-            role="teacher",
-            is_active=True,
-            user_token="dev-token-123",  # Dummy token for Moodle API calls
-            moodle_user_id=1  # Dummy Moodle user ID
-        )
-        db.add(dummy_user)
-        db.commit()
-        db.refresh(dummy_user)
-        logger.warning("Created dummy teacher user for development purposes")
-    
-    return dummy_user
-    
-    # ===========================================================================
-    # ORIGINAL AUTHENTICATION CODE - COMMENTED OUT TEMPORARILY
-    # Uncomment this and remove the dummy user code above when authentication is needed again
-    # ===========================================================================
-    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     try:
         # Decode the JWT
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
-        
+
         if username is None:
             raise credentials_exception
-            
+
         token_data = TokenData(username=username)
-        
+
     except JWTError:
         raise credentials_exception
-        
-    # Get the user from the database
-    user = db.query(User).filter(User.username == token_data.username).first()
-    
-    if user is None:
-        raise credentials_exception
-        
-    # Check if token is in the blacklist
+
+    # Reject revoked tokens
     db_token = db.query(TokenModel).filter(
         TokenModel.token == token,
         TokenModel.revoked == True
     ).first()
-    
+
     if db_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token has been revoked",
             headers={"WWW-Authenticate": "Bearer"},
         )
-        
+
+    # Get the user from the database
+    user = db.query(User).filter(User.username == token_data.username).first()
+
+    if user is None:
+        raise credentials_exception
+
     return user
-    """
 
 
 async def get_current_active_user(
@@ -182,72 +155,6 @@ async def get_current_active_user(
         raise HTTPException(status_code=400, detail="Inactive user")
         
     return current_user
-
-
-async def get_current_user_from_moodle_token(
-    request: Request,
-    db: Session = Depends(get_db)
-) -> User:
-    """
-    Get current user from moodleToken cookie or Authorization header.
-    
-    Args:
-        request: FastAPI request object to access cookies and headers
-        db: Database session
-        
-    Returns:
-        Current user based on moodleToken
-    """
-    # Try to get moodleToken from cookies first
-    token = request.cookies.get("moodleToken")
-    
-    # If not in cookies, try Authorization header as fallback for development
-    if not token:
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header.replace("Bearer ", "")
-    
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No Moodle token found in cookies or Authorization header. Please login first."
-        )
-
-    # Look up user by their moodle token
-    user = db.query(User).filter(User.user_token == token).first()
-    
-    if not user:
-        # For development/testing, create or use a dummy user if no user found
-        logger.warning(f"No user found for token {token[:10]}..., using dummy user for development")
-        dummy_user = db.query(User).filter(User.username == "dev-student").first()
-        
-        if not dummy_user:
-            # Create dummy student user for testing
-            dummy_user = User(
-                username="dev-student",
-                email="dev-student@example.com",
-                password_hash=get_password_hash("password"),
-                first_name="Development",
-                last_name="Student",
-                role="student",
-                is_active=True,
-                user_token=token,
-                moodle_user_id=2
-            )
-            db.add(dummy_user)
-            db.commit()
-            db.refresh(dummy_user)
-            logger.info("Created dummy student user for testing virtual pets")
-        else:
-            # Update dummy user's token
-            dummy_user.user_token = token
-            db.commit()
-            db.refresh(dummy_user)
-        
-        return dummy_user
-    
-    logger.info(f"Authenticated user: {user.username} (ID: {user.id}, Moodle ID: {user.moodle_user_id})")
-    return user
 
 
 def store_token(
@@ -329,52 +236,27 @@ def get_role_required(required_role: str):
     Returns:
         Dependency function
     """
+    # Roles that satisfy a given requirement (admins are implicitly allowed
+    # everywhere; teachers can do student-scoped reads where used).
+    allowed_by_requirement = {
+        "admin": {"admin"},
+        "teacher": {"admin", "teacher"},
+        "student": {"admin", "teacher", "student"},
+    }
+
     async def role_checker(current_user: User = Depends(get_current_active_user)):
-        if required_role == "admin" and current_user.role != "admin":
+        allowed = allowed_by_requirement.get(required_role, {required_role})
+        if current_user.role not in allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Insufficient permissions"
             )
-            
-        if required_role == "teacher" and current_user.role not in ["admin", "teacher"]:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions"
-            )
-            
         return current_user
-        
-    return role_checker 
+
+    return role_checker
 
 
-async def validate_moodle_token(token: str, moodle_service: Any) -> bool:
-    """
-    Validate if a Moodle token is still valid.
-    
-    Args:
-        token: Moodle token to validate
-        moodle_service: Initialized MoodleService instance
-        
-    Returns:
-        True if token is valid, False otherwise
-    """
-    if not token:
-        logger.warning("No token provided for validation")
-        return False
-    
-    logger.info(f"Validating Moodle token against {moodle_service.base_url}")
-    
-    try:
-        user_info_result = await moodle_service.get_user_info(token)
-        is_valid = user_info_result.get("success", False)
-        
-        if is_valid:
-            logger.info(f"Token validation successful")
-        else:
-            error_msg = user_info_result.get("error", "Unknown error")
-            logger.warning(f"Token validation failed: {error_msg}")
-            
-        return is_valid
-    except Exception as exc:
-        logger.error(f"Error validating token: {str(exc)}")
-        return False 
+# Convenience role dependencies
+require_admin = get_role_required("admin")
+require_teacher = get_role_required("teacher")
+require_student = get_role_required("student")

@@ -8,7 +8,7 @@ export default function DevDashboardLayout({
       <header className="bg-primary py-4">
         <div className="container mx-auto flex justify-center">
           <div className="text-primary-foreground text-xl font-bold">
-            MoodleQuest Development Mode
+            LearningQuest Development Mode
           </div>
         </div>
       </header>

@@ -6,7 +6,7 @@ import {
   type DailyQuestSummary,
   type UserDailyQuest,
 } from "@/lib/api-client";
-import { useCurrentUser } from "@/hooks/useCurrentMoodleUser";
+import { useCurrentUser } from "@/hooks/use-current-user";
 import { useGlobalXPReward } from "@/contexts/xp-reward-context";
 import { toast } from "@/hooks/use-toast";
 
@@ -26,6 +26,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import { BadgeCollection } from "@/components/student/badge-collection";
+import { DuckRaceJoinCard } from "@/components/dashboard/duck-race-join";
 import { useBadgeCollection } from "@/hooks/use-badge-collection";
 import { useSSENotifications } from "@/hooks/use-sse-notifications";
 import {
@@ -138,14 +139,6 @@ export default function StudentQuestsPage() {
   // Mock mini games data
   const miniGames: MiniGame[] = [
     {
-      id: "history-heroes",
-      title: "History Heroes",
-      playersCount: 742,
-      image: "/games/history-hero.png",
-      color: "from-purple-500 to-purple-700",
-      badge: "🏛️",
-    },
-    {
       id: "language-war",
       title: "Language War",
       playersCount: 82,
@@ -161,14 +154,6 @@ export default function StudentQuestsPage() {
       color: "from-primary to-primary/80",
       badge: "🧩",
     },
-    {
-      id: "math-master",
-      title: "Math Master",
-      playersCount: 145,
-      image: "/games/math.png",
-      color: "from-amber-500 to-amber-700",
-      badge: "🔢",
-    },
   ];
 
   // Fetch daily quests
@@ -178,6 +163,9 @@ export default function StudentQuestsPage() {
 
       try {
         setLoadingDailyQuests(true);
+        // Opening the app counts as the daily check-in (the only quest that
+        // completes this way; the rest complete from the real activity).
+        await apiClient.completeDailyLoginQuest(currentUser.id).catch(() => {});
         const summary = await apiClient.getDailyQuestSummary(currentUser.id);
         setQuestSummary(summary);
       } catch (error) {
@@ -356,7 +344,7 @@ export default function StudentQuestsPage() {
           },
           {
             id: "2",
-            title: "Welcome to MoodleQuest",
+            title: "Welcome to LearningQuest",
             description: "Learn how to navigate the platform",
             xp: 30,
             progress: 100,
@@ -747,6 +735,34 @@ export default function StudentQuestsPage() {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
+          {/* Playable: Pet Feast math game */}
+          <Link href="/dashboard/games/pet-feast" className="block">
+            <motion.div
+              variants={itemVariants}
+              whileHover={{ scale: 1.03, y: -5 }}
+              className="group h-full cursor-pointer overflow-hidden rounded-xl border border-white/10 bg-gradient-to-br from-emerald-500 to-teal-600 shadow-lg"
+            >
+              <div className="relative flex h-36 flex-col p-4 text-white md:h-44 md:p-6">
+                <div className="absolute right-4 top-4 text-3xl md:text-4xl">🍖</div>
+                <h3 className="mb-1 text-lg font-bold md:text-xl">Pet Feast</h3>
+                <div className="mb-2 flex items-center gap-1 text-xs md:text-sm">
+                  <BookOpen className="h-3 w-3" /> <span>Mathematics</span>
+                </div>
+                <p className="text-xs text-white/90 md:text-sm">
+                  Answer math to feed your pet &amp; earn food + XP.
+                </p>
+                <span className="mt-auto inline-flex w-fit items-center rounded-full bg-white/20 px-3 py-1.5 text-xs font-medium transition-colors group-hover:bg-white/30">
+                  <Play className="mr-1 h-3 w-3" /> Play Now
+                </span>
+              </div>
+            </motion.div>
+          </Link>
+
+          {/* Playable: Math Duck Race (multiplayer) */}
+          <motion.div variants={itemVariants} whileHover={{ scale: 1.03, y: -5 }} className="relative">
+            <DuckRaceJoinCard />
+          </motion.div>
+
           {miniGames.map((game, index) => (
             <motion.div
               key={game.id}
@@ -909,6 +925,7 @@ export default function StudentQuestsPage() {
                         <span className="text-xs md:text-sm text-amber-500 font-medium">
                           +{quest.daily_quest.xp_reward} XP
                         </span>
+                        <span className="text-xs md:text-sm font-medium">🍖 +2</span>
                       </div>
                     </div>
                   </div>
@@ -930,38 +947,27 @@ export default function StudentQuestsPage() {
                       />
                     </div>
 
-                    <Button
-                      size="sm"
-                      onClick={() => handleCompleteQuest(quest)}
-                      disabled={
-                        quest.status === "completed" ||
-                        completingQuest === quest.daily_quest.quest_type
-                      }
-                      className={`rounded-full px-3 md:px-4 text-xs ${
+                    {/* Status only — quests complete automatically from the
+                        real activity, never from a button click. */}
+                    <div
+                      className={`flex items-center gap-1 rounded-full px-3 md:px-4 py-1.5 text-xs font-medium ${
                         quest.status === "completed"
-                          ? "bg-green-500 hover:bg-green-600"
-                          : ""
+                          ? "bg-green-500/15 text-green-600 dark:text-green-400"
+                          : "bg-muted text-muted-foreground"
                       }`}
                     >
-                      {completingQuest === quest.daily_quest.quest_type ? (
-                        <div className="flex items-center gap-1">
-                          <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                          <span>...</span>
-                        </div>
-                      ) : quest.status === "completed" ? (
-                        <div className="flex items-center gap-1">
+                      {quest.status === "completed" ? (
+                        <>
                           <CheckCircle2 className="h-3 w-3" />
                           <span>Done</span>
-                        </div>
-                      ) : quest.current_progress >= quest.target_progress ? (
-                        "Claim"
+                        </>
                       ) : (
-                        <div className="flex items-center gap-1">
+                        <>
                           <Clock className="h-3 w-3" />
-                          <span>Pending</span>
-                        </div>
+                          <span>In progress</span>
+                        </>
                       )}
-                    </Button>
+                    </div>
                   </div>
                 </motion.div>
               ))

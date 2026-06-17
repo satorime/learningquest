@@ -50,6 +50,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useLeaderboard } from "@/hooks/useLeaderboard";
 import { LeaderboardUser } from "@/types/gamification";
+import { classService, type ClassItem } from "@/lib/class-service";
 
 interface StudentStats {
   totalStudents: number;
@@ -67,9 +68,37 @@ function getStableMockActivityDays(studentId: number): number {
 
 export default function TeacherStudentsPage() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedCourse, setSelectedCourse] = useState<string>("all");
   const [sortBy, setSortBy] = useState<string>("rank");
   const [filterBy, setFilterBy] = useState<string>("all");
+
+  // Class filter — the teacher's classes + the set of student ids in each, so
+  // the overview can be narrowed to one class when they teach several.
+  const [classes, setClasses] = useState<ClassItem[]>([]);
+  const [membersByClass, setMembersByClass] = useState<Record<number, Set<number>>>({});
+  const [classFilter, setClassFilter] = useState<number | "all">("all");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const cls = await classService.listMyClasses().catch(() => []);
+      if (cancelled) return;
+      setClasses(cls);
+      const entries = await Promise.all(
+        cls.map(async (c) => {
+          const members = await classService.listMembers(c.id).catch(() => []);
+          const ids = new Set(
+            members.filter((m) => m.role === "student").map((m) => m.user_id)
+          );
+          return [c.id, ids] as const;
+        })
+      );
+      if (cancelled) return;
+      setMembersByClass(Object.fromEntries(entries));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   
   // Handler for sort change with validation
   const handleSortChange = (value: string) => {
@@ -115,7 +144,10 @@ export default function TeacherStudentsPage() {
 
   // Filter students based on criteria
   const filteredStudents = useMemo(() => {
+    const classIds = classFilter !== "all" ? membersByClass[classFilter] : null;
     return displayedStudents.filter((student) => {
+      // Narrow to the selected class's enrolled students.
+      if (classIds && !classIds.has(student.id)) return false;
       // Use stable mock activity days based on student ID
       const mockLastActivityDays = getStableMockActivityDays(student.id);
       if (filterBy === "active") return mockLastActivityDays <= 7;
@@ -124,7 +156,7 @@ export default function TeacherStudentsPage() {
       // For needs attention we do not filter; sorting will handle ordering
       return true;
     });
-  }, [displayedStudents, filterBy]);
+  }, [displayedStudents, filterBy, classFilter, membersByClass]);
 
   // Sort students
   const sortedStudents = useMemo(() => {
@@ -184,21 +216,29 @@ export default function TeacherStudentsPage() {
       }
     });
   }, [filteredStudents, filterBy, sortBy]);
+  // Students in scope for the summary cards: all of the teacher's, or just the
+  // selected class.
+  const scopedStudents = useMemo(() => {
+    if (classFilter === "all") return allStudents;
+    const ids = membersByClass[classFilter];
+    return ids ? allStudents.filter((s) => ids.has(s.id)) : [];
+  }, [allStudents, classFilter, membersByClass]);
+
   // Calculate stats
   const stats: StudentStats = {
-    totalStudents: allStudents.length,
-    activeStudents: Math.floor(allStudents.length * 0.7), // Mock 70% active rate
+    totalStudents: scopedStudents.length,
+    activeStudents: Math.floor(scopedStudents.length * 0.7), // Mock 70% active rate
     averageProgress:
-      allStudents.length > 0
+      scopedStudents.length > 0
         ? Math.round(
-            allStudents.reduce((sum, s) => sum + s.stats.exp_points, 0) /
-              allStudents.length
+            scopedStudents.reduce((sum, s) => sum + s.stats.exp_points, 0) /
+              scopedStudents.length
           )
         : 0,
     topPerformer:
-      allStudents.length > 0
-        ? `${allStudents[0]?.first_name} ${allStudents[0]?.last_name}`.trim() ||
-          allStudents[0]?.username ||
+      scopedStudents.length > 0
+        ? `${scopedStudents[0]?.first_name} ${scopedStudents[0]?.last_name}`.trim() ||
+          scopedStudents[0]?.username ||
           "Unknown"
         : "No students",
   };
@@ -330,9 +370,29 @@ export default function TeacherStudentsPage() {
           
         </div>
         <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
-          
-        <Select 
-            value={sortBy} 
+
+        {classes.length > 1 && (
+          <Select
+            value={classFilter === "all" ? "all" : String(classFilter)}
+            onValueChange={(v) => setClassFilter(v === "all" ? "all" : Number(v))}
+          >
+            <SelectTrigger className="w-full sm:w-[180px]">
+              <Filter className="h-4 w-4 mr-2" />
+              <SelectValue placeholder="Class" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Classes</SelectItem>
+              {classes.map((c) => (
+                <SelectItem key={c.id} value={String(c.id)}>
+                  {c.title}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+
+        <Select
+            value={sortBy}
             onValueChange={handleSortChange}
           >
             <SelectTrigger className="w-full sm:w-[150px]">
@@ -503,7 +563,7 @@ export default function TeacherStudentsPage() {
       {/* Student Detail Modal */}
       {selectedStudent && (
         <Card className="fixed inset-0 z-50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-          <div className="fixed left-[50%] top-[50%] z-50 grid w-full max-w-2xl translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 sm:rounded-lg">
+          <div className="fixed left-[50%] top-[50%] z-50 grid w-[calc(100%-1.5rem)] max-w-2xl max-h-[90vh] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto border bg-background p-4 sm:p-6 shadow-lg duration-200 rounded-lg">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold">Student Details</h3>
               <Button
@@ -544,7 +604,7 @@ export default function TeacherStudentsPage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <div className="text-sm font-medium text-muted-foreground">
                     Experience Points

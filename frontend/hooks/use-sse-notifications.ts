@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useCurrentUser } from "./useCurrentMoodleUser";
+import { useCurrentUser } from "./use-current-user";
+import { apiClient } from "@/lib/api-client";
 
 // API URL from environment
 const API_BASE_URL =
@@ -19,6 +20,8 @@ export interface SSENotificationData {
     quest_title?: string;
     quest_id?: number;
     completion_percentage?: number;
+    class_id?: number;
+    room_id?: number;
   };
   // For level up notifications
   previous_level?: number;
@@ -170,7 +173,10 @@ class SSEManager {
     });
 
     try {
-      const url = `${API_BASE_URL}/notifications/events/${userId}`;
+      // EventSource can't send an Authorization header, so the access token
+      // rides as a query param; the backend validates it and enforces ownership.
+      const token = apiClient.getToken();
+      const url = `${API_BASE_URL}/notifications/events/${userId}?token=${encodeURIComponent(token)}`;
       const eventSource = new EventSource(url);
       connection.eventSource = eventSource;
 

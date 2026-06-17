@@ -21,7 +21,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Loader2 } from "lucide-react";
-import { apiClient } from "@/lib/api-client";
+import { apiClient, cleanError } from "@/lib/api-client";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { useNotify } from "@/components/ui/notify-dialog";
 
 interface Quest {
   quest_id: number;
@@ -63,7 +65,9 @@ const VALIDATION_METHODS = [
 ];
 
 export function EditQuestModal({ isOpen, onClose, quest, onSuccess }: EditQuestModalProps) {
-  
+  const confirm = useConfirm();
+  const notify = useNotify();
+
   const [formData, setFormData] = useState({
     title: "",
     description: "",
@@ -95,6 +99,13 @@ export function EditQuestModal({ isOpen, onClose, quest, onSuccess }: EditQuestM
     e.preventDefault();
     if (!quest) return;
 
+    const ok = await confirm({
+      title: "Save changes?",
+      description: `Update "${formData.title || quest.title}"?`,
+      confirmText: "Save",
+    });
+    if (!ok) return;
+
     setLoading(true);
     setError(null);
 
@@ -116,12 +127,14 @@ export function EditQuestModal({ isOpen, onClose, quest, onSuccess }: EditQuestM
 
       // Call the update API
       await apiClient.updateQuest(quest.quest_id, updateData);
-      
+
+      await notify({ variant: "success", description: "Quest updated." });
       onSuccess();
       onClose();
     } catch (err) {
       console.error("Error updating quest:", err);
       setError("Failed to update quest. Please try again.");
+      await notify({ variant: "error", description: cleanError(err, "Failed to update the quest.") });
     } finally {
       setLoading(false);
     }
@@ -183,7 +196,7 @@ export function EditQuestModal({ isOpen, onClose, quest, onSuccess }: EditQuestM
             />  
           </div>
 
-          <div className="grid grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             <div className="space-y-3">
               <Label htmlFor="difficulty" className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                 <span className="w-2 h-2 bg-emerald-400 rounded-full"></span>

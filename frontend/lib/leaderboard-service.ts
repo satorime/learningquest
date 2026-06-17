@@ -10,7 +10,23 @@ import {
   MetricType
 } from '@/types/gamification';
 
+export interface ClassLeaderboardEntry {
+  rank: number;
+  name: string;
+}
+
 export class LeaderboardService {
+  /**
+   * Class leaderboard — Top 10 by quiz score, names only (members-only on the
+   * backend). No scores are returned.
+   */
+  async getClassLeaderboard(classId: number): Promise<ClassLeaderboardEntry[]> {
+    return await apiClient.request<ClassLeaderboardEntry[]>(
+      `/classes/${classId}/leaderboard`,
+      "GET"
+    );
+  }
+
   /**
    * Get all leaderboards with optional filtering
    */

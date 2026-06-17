@@ -169,7 +169,7 @@ export function BadgeCreator({ onBadgeCreated, onCancel }: BadgeCreatorProps) {
       newErrors.criteria_target = "Target must be at least 1";
     }
 
-    if (!formData.criteria.description.trim()) {
+    if (!formData.criteria.description?.trim()) {
       newErrors.criteria_description = "Criteria description is required";
     }
 

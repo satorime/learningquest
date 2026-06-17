@@ -53,23 +53,23 @@ export function ProgressTracker() {
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      className="space-y-6 p-6 rounded-xl bg-card dark:bg-transparent"
+      className="space-y-6 p-3 sm:p-6 rounded-xl bg-card dark:bg-transparent"
     >
       <div className="flex flex-col gap-2">
-        <h2 className="text-3xl font-bold tracking-tight text-primary">
+        <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-primary">
           Progress Tracker
         </h2>
-        <p className="text-muted-foreground">
+        <p className="text-sm sm:text-base text-muted-foreground">
           Monitor your learning journey and track your achievements over time.
         </p>
       </div>
 
       <Tabs defaultValue="weekly">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xl font-bold text-primary">Activity Overview</h3>
-          <TabsList>
-            <TabsTrigger value="weekly">Weekly</TabsTrigger>
-            <TabsTrigger value="monthly">Monthly</TabsTrigger>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h3 className="text-lg sm:text-xl font-bold text-primary">Activity Overview</h3>
+          <TabsList className="w-full sm:w-auto">
+            <TabsTrigger value="weekly" className="flex-1 sm:flex-none">Weekly</TabsTrigger>
+            <TabsTrigger value="monthly" className="flex-1 sm:flex-none">Monthly</TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value="weekly" className="mt-4">
@@ -78,8 +78,8 @@ export function ProgressTracker() {
             transition={{ type: "spring", stiffness: 400, damping: 10 }}
           >
             <Card className="border-none shadow-md hover:shadow-lg transition-shadow duration-300">
-              <CardContent className="pt-6">
-                <div className="h-[300px]">
+              <CardContent className="p-3 pt-4 sm:p-6 sm:pt-6">
+                <div className="h-[240px] sm:h-[300px]">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={weeklyData}>
                       <CartesianGrid
@@ -189,8 +189,8 @@ export function ProgressTracker() {
             transition={{ type: "spring", stiffness: 400, damping: 10 }}
           >
             <Card className="border-none shadow-md hover:shadow-lg transition-shadow duration-300">
-              <CardContent className="pt-6">
-                <div className="h-[300px]">
+              <CardContent className="p-3 pt-4 sm:p-6 sm:pt-6">
+                <div className="h-[240px] sm:h-[300px]">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={monthlyData}>
                       <CartesianGrid

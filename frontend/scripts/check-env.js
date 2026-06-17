@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-// Environment Variable Checker for MoodleQuest
+// Environment Variable Checker for LearningQuest
 // Run this script to verify your environment variables are properly set
 
-console.log('🔍 Checking MoodleQuest Environment Variables...\n');
+console.log('🔍 Checking LearningQuest Environment Variables...\n');
 
 const requiredEnvVars = [
   'NEXT_PUBLIC_MOODLE_URL',

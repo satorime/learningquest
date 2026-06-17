@@ -21,11 +21,12 @@ import {
   Trophy,
   Target
 } from "lucide-react";
-import { apiClient } from "@/lib/api-client";
+import { apiClient, cleanError } from "@/lib/api-client";
 import { formatDistanceToNow } from "date-fns";
 import { EditQuestModal } from "./edit-quest-modal";
 import { DeleteQuestDialog } from "./delete-quest-dialog";
 import { useRouter } from "next/navigation";
+import { useNotify } from "@/components/ui/notify-dialog";
 
 interface Quest {
   quest_id: number;
@@ -71,6 +72,7 @@ export function QuestManager() {
   const [selectedQuest, setSelectedQuest] = useState<Quest | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const router = useRouter();
+  const notify = useNotify();
 
   // Debug logging
   console.log("QuestManager render:", { editModalOpen, deleteDialogOpen, selectedQuest });
@@ -83,7 +85,7 @@ export function QuestManager() {
       let creatorIdParam = "";
       try {
         if (typeof window !== "undefined") {
-          const raw = localStorage.getItem("moodlequest_user");
+          const raw = localStorage.getItem("learningquest_user");
           if (raw) {
             const parsed = JSON.parse(raw);
             if (parsed?.id) {
@@ -137,9 +139,10 @@ export function QuestManager() {
       await fetchQuests(); // Refresh the list
       setDeleteDialogOpen(false);
       setSelectedQuest(null);
+      await notify({ variant: "success", description: "Quest deleted." });
     } catch (err) {
       console.error("Error deleting quest:", err);
-      alert("Failed to delete quest. Please try again.");
+      await notify({ variant: "error", description: cleanError(err, "Failed to delete the quest.") });
     } finally {
       setDeleteLoading(false);
     }

@@ -8,12 +8,13 @@ from app.database.connection import get_db
 from app.models.user import User
 from app.services.daily_quest_service import DailyQuestService
 from app.schemas.daily_quest import (
-    DailyQuestSummary, 
-    UserDailyQuestResponse, 
+    DailyQuestSummary,
+    UserDailyQuestResponse,
     QuestCompletionRequest,
     QuestCompletionResponse
 )
 from app.models.streak import UserStreak
+from app.utils.auth import get_current_active_user, require_admin
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,40 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+
+def _resolve_target_user(
+    db: Session,
+    user_id: int,
+    current_user: User,
+    *,
+    self_only: bool = False,
+    staff_only: bool = False,
+) -> User:
+    """Resolve the target user (by internal id) with an access check.
+
+    Path ids are the internal user id. A user may always act on themselves;
+    teachers/admins may read others. Reward-granting actions are self_only.
+    """
+    is_self = current_user.id == user_id
+    is_staff = current_user.role in ("teacher", "admin")
+    if self_only and not is_self:
+        raise HTTPException(status_code=403, detail="You can only do this for your own account")
+    if staff_only and not is_staff:
+        raise HTTPException(status_code=403, detail="Teacher or admin only")
+    if not (is_self or is_staff):
+        raise HTTPException(status_code=403, detail="Not authorized to access this user")
+    if is_self:
+        return current_user
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
 @router.post("/seed")
-async def seed_daily_quests(db: Session = Depends(get_db)):
+async def seed_daily_quests(
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
     """
     Seed the database with all daily quest templates.
     This should be run once during setup.
@@ -38,21 +71,18 @@ async def seed_daily_quests(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/user/{user_id}", response_model=DailyQuestSummary)
-async def get_user_daily_quests(
+def get_user_daily_quests(
     user_id: int,
     target_date: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Get daily quests for a specific user on a specific date.
-    If no date provided, uses today's date.
-    The user_id parameter is the Moodle user ID.
+    If no date provided, uses today's date. The user_id is the internal user id.
     """
-    # Verify user exists - look up by moodle_user_id
-    user = db.query(User).filter(User.moodle_user_id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
+    user = _resolve_target_user(db, user_id, current_user)
+
     service = DailyQuestService(db)
     
     try:
@@ -74,30 +104,29 @@ async def get_user_daily_quests(
 async def complete_daily_quest(
     user_id: int,
     request: QuestCompletionRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
-    Complete a daily quest for a user.
-    Supports daily_login, feed_pet, and earn_xp quest types.
-    The user_id parameter is the Moodle user ID.
+    Complete a daily quest for the authenticated user (self only — this grants
+    rewards). Supports daily_login, feed_pet, and earn_xp quest types.
     """
-    # Verify user exists - look up by moodle_user_id
-    user = db.query(User).filter(User.moodle_user_id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
+    user = _resolve_target_user(db, user_id, current_user, self_only=True)
+
     service = DailyQuestService(db)
-    
+
     try:
-        # Handle different quest types
+        # Only the "check-in" (daily_login) completes by opening the app. The
+        # other quests complete automatically from the real action (submitting a
+        # quiz, earning XP) and CANNOT be claimed manually — otherwise they'd be
+        # free to cheat with a button click.
         if request.quest_type == "daily_login":
             result = service.complete_daily_login_quest(user.id)
-        elif request.quest_type == "feed_pet":
-            result = service.complete_feed_pet_quest(user.id)
-        elif request.quest_type == "earn_xp":
-            # For earn_xp quest, we may need additional parameters
-            xp_amount = getattr(request, 'xp_amount', 10)  # Default XP contribution
-            result = service.complete_earn_xp_quest(user.id, xp_amount)
+        elif request.quest_type in ("complete_quiz", "earn_xp", "feed_pet"):
+            raise HTTPException(
+                status_code=400,
+                detail="This quest completes automatically when you do the activity.",
+            )
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported quest type: {request.quest_type}")
         
@@ -125,18 +154,15 @@ async def complete_daily_quest(
 async def generate_daily_quest_for_user(
     user_id: int,
     target_date: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
-    Manually generate daily quests for a user on a specific date.
-    Useful for testing or manual quest assignment.
-    The user_id parameter is the Moodle user ID.
+    Manually generate daily quests for a user on a specific date (staff tool).
+    The user_id is the internal user id.
     """
-    # Verify user exists - look up by moodle_user_id
-    user = db.query(User).filter(User.moodle_user_id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
+    user = _resolve_target_user(db, user_id, current_user, staff_only=True)
+
     service = DailyQuestService(db)
     
     try:
@@ -165,7 +191,8 @@ async def generate_daily_quest_for_user(
 @router.post("/expire-old")
 async def expire_old_quests(
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
 ):
     """
     Expire old quests that have passed their expiration time.
@@ -181,7 +208,10 @@ async def expire_old_quests(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/templates")
-async def get_quest_templates(db: Session = Depends(get_db)):
+async def get_quest_templates(
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_active_user),
+):
     """
     Get all available daily quest templates.
     """
@@ -198,20 +228,18 @@ async def get_quest_templates(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/user/{user_id}/streak")
-async def get_user_streak(
+def get_user_streak(
     user_id: int,
     streak_type: str = "daily_login",
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Get user's streak information for a specific streak type.
-    The user_id parameter is the Moodle user ID.
+    The user_id is the internal user id.
     """
-    # Verify user exists - look up by moodle_user_id
-    user = db.query(User).filter(User.moodle_user_id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
+    user = _resolve_target_user(db, user_id, current_user)
+
     try:
         # Get user's streak information
         streak = db.query(UserStreak).filter(
@@ -247,7 +275,8 @@ async def get_user_streak(
 @router.get("/top-streak")
 async def get_top_login_streak(
     streak_type: str = "daily_login",
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_active_user),
 ):
     """
     Get the user with the highest current login streak.

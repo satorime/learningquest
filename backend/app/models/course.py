@@ -25,6 +25,8 @@ class Course(Base):
     visible = Column(Boolean, default=True)
     category_id = Column(Integer, nullable=True)
     last_synced_at = Column(DateTime(timezone=True), server_default=func.now())
-    
+    # Google Drive folder id for this class (under the teacher's root folder).
+    gdrive_folder_id = Column(String(128), nullable=True)
+
     # Relationships - use string reference to avoid circular import
     enrollments = relationship("CourseEnrollment", back_populates="course", cascade="all, delete-orphan", lazy="dynamic") 

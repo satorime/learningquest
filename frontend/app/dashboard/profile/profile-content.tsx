@@ -28,10 +28,7 @@ import {
   MapPin,
   Briefcase,
 } from "lucide-react";
-import {
-  fetchUserProfileFromBackend,
-  ProfileData as MoodleProfileData,
-} from "@/lib/profile-service";
+import { fetchUserProfileFromBackend } from "@/lib/profile-service";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -103,7 +100,7 @@ export function ProfileContent() {
     try {
       const data = await fetchUserProfileFromBackend(user);
       if (data) {
-        // Convert from MoodleProfileData to our component's ProfileData format
+        // Adapt the backend payload to this component's ProfileData shape.
         setProfileData(data as unknown as ProfileData);
       } else {
         setError("Could not load profile data");

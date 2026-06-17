@@ -3,7 +3,13 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
-import { fetchUserProfileFromBackend } from "@/lib/profile-service";
+import {
+  fetchUserProfileFromBackend,
+  updateUserProfileOnBackend,
+  requestEmailChange,
+  confirmEmailChange,
+} from "@/lib/profile-service";
+import { isApiError } from "@/lib/api-client";
 import {
   Card,
   CardContent,
@@ -17,15 +23,19 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { useAppToast } from "@/hooks/use-react-hot-toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { useNotify } from "@/components/ui/notify-dialog";
 import { motion } from "framer-motion";
 import { ArrowLeft, Check } from "lucide-react";
 import Link from "next/link";
-import { apiClient } from "@/lib/api-client";
 
 export default function ProfileEditPage() {
-  const { user } = useAuth();
-  const { success, error: showError, info } = useAppToast();
+  const { user, updateUser } = useAuth();
+  const confirm = useConfirm();
+  const notify = useNotify();
+  const success = (msg: string) => notify({ variant: "success", description: msg });
+  const showError = (msg: string) => notify({ variant: "error", description: msg });
+  const info = (msg: string) => notify({ variant: "info", description: msg });
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -108,51 +118,109 @@ export default function ProfileEditPage() {
   const handleSave = async () => {
     if (!user) return;
 
+    const ok = await confirm({
+      title: "Save changes?",
+      description: "Update your profile with these details?",
+      confirmText: "Save",
+    });
+    if (!ok) return;
+
     try {
       setSaving(true);
 
-      // Only update allowed fields
-      const updateData = {
-        userId: user.id,
-        firstName: formData.firstName,
-        lastName: formData.lastName,
+      const updated = await updateUserProfileOnBackend(user, {
+        first_name: formData.firstName.trim(),
+        last_name: formData.lastName.trim(),
         bio: formData.bio,
-        email: formData.email,
-        socialMedia: formData.socialMedia,
-        preferences: formData.preferences,
-      };
+      });
 
-      // Call API to update profile
-      // In a real app, you'd send this to your server
-      console.log("Saving profile data:", updateData);
-
-      // Simulate API call
-      await new Promise((resolve) => setTimeout(resolve, 800));
-
-      // Update Moodle user data where possible
-      try {
-        await apiClient.storeUser({
-          moodleId: user.moodleId,
-          username: user.username,
-          email: formData.email,
-          firstName: formData.firstName,
-          lastName: formData.lastName,
-          token: user.token,
-          bio: formData.bio,
-        });
-      } catch (e) {
-        console.warn("Non-critical: Failed to update Moodle profile", e);
-      }
+      // Reflect the change across the app (header, profile page) + persist it.
+      const fullName =
+        `${formData.firstName.trim()} ${formData.lastName.trim()}`.trim() ||
+        user.username;
+      updateUser({ name: fullName });
+      if (updated) setProfileData(updated);
 
       success("Profile updated successfully");
-
-      // Navigate back to profile
       router.push("/dashboard/profile");
     } catch (error) {
       console.error("Failed to save profile:", error);
-      showError("Failed to save changes");
+      if (isApiError(error, 403)) {
+        showError("You can only edit your own profile");
+      } else {
+        showError("Failed to save changes");
+      }
     } finally {
       setSaving(false);
+    }
+  };
+
+  // --- Verified email change -------------------------------------------------
+  // Email isn't editable inline; changing it requires confirming a code sent to
+  // the new address.
+  const [emailMode, setEmailMode] = useState<"view" | "editing" | "code-sent">(
+    "view"
+  );
+  const [newEmail, setNewEmail] = useState("");
+  const [emailCode, setEmailCode] = useState("");
+  const [emailBusy, setEmailBusy] = useState(false);
+
+  const cancelEmailChange = () => {
+    setEmailMode("view");
+    setNewEmail("");
+    setEmailCode("");
+  };
+
+  const handleSendEmailCode = async () => {
+    if (!user) return;
+    const target = newEmail.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(target)) {
+      showError("Please enter a valid email address");
+      return;
+    }
+    try {
+      setEmailBusy(true);
+      const res = await requestEmailChange(user, target);
+      info(res.message || `A verification code was sent to ${target}`);
+      setEmailMode("code-sent");
+    } catch (error) {
+      if (isApiError(error, 409)) {
+        showError("That email is already in use by another account");
+      } else if (isApiError(error, 400)) {
+        showError("That email can't be used. Try a different address.");
+      } else {
+        showError("Failed to send verification code");
+      }
+    } finally {
+      setEmailBusy(false);
+    }
+  };
+
+  const handleConfirmEmailCode = async () => {
+    if (!user) return;
+    if (!emailCode.trim()) {
+      showError("Enter the code from your email");
+      return;
+    }
+    try {
+      setEmailBusy(true);
+      const updated = await confirmEmailChange(user, emailCode.trim());
+      const confirmedEmail = updated?.email || newEmail.trim();
+      setFormData((prev) => ({ ...prev, email: confirmedEmail }));
+      if (updated) setProfileData(updated);
+      updateUser({ email: confirmedEmail });
+      success("Email updated successfully");
+      cancelEmailChange();
+    } catch (error) {
+      if (isApiError(error, 409)) {
+        showError("That email is already in use by another account");
+      } else if (isApiError(error, 400)) {
+        showError("Incorrect or expired code. Try again.");
+      } else {
+        showError("Failed to verify code");
+      }
+    } finally {
+      setEmailBusy(false);
     }
   };
 
@@ -232,27 +300,23 @@ export default function ProfileEditPage() {
                   {formData.firstName?.[0] || user?.name?.[0] || "U"}
                 </AvatarFallback>
               </Avatar>
-              <p className="text-sm text-muted-foreground mt-2">
-                Profile image is managed through your Moodle account
-              </p>
             </div>
 
             {/* Personal Information */}
             <div className="space-y-4">
               <h3 className="font-medium">Personal Information</h3>
 
-              {/* <div className="grid grid-cols-1 md:grid-cols-2 gap-4"> */}
-              <div className="space-y-2">
-                <Label htmlFor="firstName">Username</Label>
-                <Input
-                  id="firstName"
-                  name="firstName"
-                  value={formData.firstName}
-                  onChange={handleChange}
-                  placeholder="Enter your first name"
-                />
-              </div>
-              {/* 
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="firstName">First Name</Label>
+                  <Input
+                    id="firstName"
+                    name="firstName"
+                    value={formData.firstName}
+                    onChange={handleChange}
+                    placeholder="Enter your first name"
+                  />
+                </div>
                 <div className="space-y-2">
                   <Label htmlFor="lastName">Last Name</Label>
                   <Input
@@ -262,18 +326,109 @@ export default function ProfileEditPage() {
                     onChange={handleChange}
                     placeholder="Enter your last name"
                   />
-                </div> */}
-              {/* </div> */}
+                </div>
+              </div>
 
               <div className="space-y-2">
                 <Label htmlFor="email">Email</Label>
-                <Input
-                  id="email"
-                  name="email"
-                  value={formData.email}
-                  onChange={handleChange}
-                  placeholder="Enter your email"
-                />
+
+                {emailMode === "view" && (
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id="email"
+                      value={formData.email}
+                      disabled
+                      readOnly
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        setNewEmail("");
+                        setEmailMode("editing");
+                      }}
+                    >
+                      Change
+                    </Button>
+                  </div>
+                )}
+
+                {emailMode === "editing" && (
+                  <div className="space-y-2 rounded-md border p-3">
+                    <Label htmlFor="newEmail" className="text-sm">
+                      New email address
+                    </Label>
+                    <Input
+                      id="newEmail"
+                      type="email"
+                      value={newEmail}
+                      onChange={(e) => setNewEmail(e.target.value)}
+                      placeholder="you@example.com"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      We&apos;ll send a verification code to this address. Your
+                      email won&apos;t change until you confirm it.
+                    </p>
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        onClick={handleSendEmailCode}
+                        disabled={emailBusy}
+                      >
+                        {emailBusy ? "Sending…" : "Send code"}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={cancelEmailChange}
+                        disabled={emailBusy}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {emailMode === "code-sent" && (
+                  <div className="space-y-2 rounded-md border p-3">
+                    <Label htmlFor="emailCode" className="text-sm">
+                      Enter the code sent to{" "}
+                      <span className="font-medium">{newEmail}</span>
+                    </Label>
+                    <Input
+                      id="emailCode"
+                      inputMode="numeric"
+                      value={emailCode}
+                      onChange={(e) => setEmailCode(e.target.value)}
+                      placeholder="6-digit code"
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        onClick={handleConfirmEmailCode}
+                        disabled={emailBusy}
+                      >
+                        {emailBusy ? "Verifying…" : "Verify & update"}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={handleSendEmailCode}
+                        disabled={emailBusy}
+                      >
+                        Resend code
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={cancelEmailChange}
+                        disabled={emailBusy}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -342,22 +497,10 @@ export default function ProfileEditPage() {
                   readOnly
                 />
                 <p className="text-xs text-muted-foreground mt-1">
-                  Role is managed by your institution
+                  Role is assigned by your teacher or administrator
                 </p>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="moodleId">Moodle ID</Label>
-                <Input
-                  id="moodleId"
-                  value={user?.moodleId || ""}
-                  disabled
-                  readOnly
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  System identifier for your Moodle account
-                </p>
-              </div>
             </div>
           </CardContent>
 

@@ -1,94 +1,90 @@
 from sqlalchemy.orm import Session
 from app.models.user import User
 from app.models.course import Course
-from app.models.auth import MoodleConfig
-from passlib.context import CryptContext
-import os
+from app.utils.auth import get_password_hash
+from app.config import ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _ensure_admin(db: Session) -> User:
+    """Create the bootstrap admin account if no admin exists yet."""
+    admin = db.query(User).filter(User.role == "admin").first()
+    if admin:
+        return admin
+
+    admin = User(
+        username=ADMIN_USERNAME,
+        email=ADMIN_EMAIL,
+        password_hash=get_password_hash(ADMIN_PASSWORD),
+        first_name="Platform",
+        last_name="Admin",
+        role="admin",
+        auth_provider="local",
+        is_active=True,
+        is_verified=True,
+    )
+    db.add(admin)
+    db.flush()
+    return admin
+
 
 def seed_initial_data(db: Session):
-    """Seed initial data for testing purposes"""
-    # Check if we already have users
-    if db.query(User).count() > 0:
-        # If we have users, just update the Moodle config if needed
-        moodle_url = os.getenv("MOODLE_URL")
-        if moodle_url:
-            moodle_config = db.query(MoodleConfig).first()
-            if moodle_config:
-                moodle_config.base_url = moodle_url
-                db.commit()
-        return  # Skip the rest of data seeding
-    
-    # Create a teacher user
+    """Seed initial data: always ensure an admin exists; add dev samples on a
+    fresh database only."""
+    _ensure_admin(db)
+
+    # If we already have non-admin users, assume the DB is seeded.
+    if db.query(User).filter(User.role != "admin").count() > 0:
+        db.commit()
+        return
+
+    # --- Development sample data (fresh DB only) ---
     teacher = User(
         username="teacher1",
         email="teacher@example.com",
-        password_hash=pwd_context.hash("password123"),
+        password_hash=get_password_hash("password123"),
         first_name="Teacher",
         last_name="User",
-        role="teacher"
+        role="teacher",
+        auth_provider="local",
+        is_verified=True,
     )
     db.add(teacher)
-    db.flush()  # So we get the ID
-    
-    # Create a student user
+    db.flush()
+
     student = User(
         username="student1",
         email="student@example.com",
-        password_hash=pwd_context.hash("password123"),
+        password_hash=get_password_hash("password123"),
         first_name="Student",
         last_name="User",
-        role="student"
+        role="student",
+        auth_provider="local",
+        is_verified=True,
     )
     db.add(student)
     db.flush()
-    
-    # Add a default Moodle configuration
-    if db.query(MoodleConfig).count() == 0:
-        moodle_config = MoodleConfig(
-            base_url=os.getenv("MOODLE_URL"),
-            service_name="modquest"
-        )
-        db.add(moodle_config)
-        db.flush()
-    
-    # Create sample courses
+
     courses = [
         Course(
             title="Introduction to Computer Science",
             description="Learn the fundamentals of computer science and programming",
             course_code="CS101",
-            teacher_id=teacher.id
+            teacher_id=teacher.id,
         ),
         Course(
             title="Web Development Fundamentals",
             description="Build and design websites using HTML, CSS and JavaScript",
             course_code="WEB101",
-            teacher_id=teacher.id
+            teacher_id=teacher.id,
         ),
         Course(
             title="Data Structures and Algorithms",
             description="Study common data structures and algorithms used in computer science",
             course_code="CS201",
-            teacher_id=teacher.id
+            teacher_id=teacher.id,
         ),
-        Course(
-            title="Mobile App Development",
-            description="Create mobile apps for iOS and Android platforms",
-            course_code="MOB101",
-            teacher_id=teacher.id
-        ),
-        Course(
-            title="Artificial Intelligence Basics",
-            description="Introduction to artificial intelligence and machine learning",
-            course_code="AI101",
-            teacher_id=teacher.id
-        )
     ]
-    
     for course in courses:
         db.add(course)
-    
-    db.commit() 
+
+    db.commit()

@@ -2,7 +2,7 @@ import toast from 'react-hot-toast';
 
 /**
  * Custom hook to provide consistent toast styling across the app
- * Built on top of react-hot-toast with MoodleQuest theming
+ * Built on top of react-hot-toast with LearningQuest theming
  */
 export const useAppToast = () => {
   const success = (message: string) => {

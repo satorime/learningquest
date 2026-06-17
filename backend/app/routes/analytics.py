@@ -12,6 +12,7 @@ from app.models.quest import QuestProgress, Quest, ExperiencePoints
 from app.models.user import User
 from app.models.course import Course
 from app.auth.dependencies import get_current_user_optional
+from app.utils.auth import get_role_required
 
 
 # Caching helpers for endpoints
@@ -43,7 +44,11 @@ def get_performance_cache_key(time_range, course_id):
 def cached_performance_analytics(time_range, course_id):
     return None
 
-router = APIRouter(prefix="/analytics", tags=["analytics"])
+router = APIRouter(
+    prefix="/analytics",
+    tags=["analytics"],
+    dependencies=[Depends(get_role_required("teacher"))],
+)
 
 @router.get("/engagement")
 async def get_engagement_analytics(

@@ -61,7 +61,12 @@ class PetResponse(BaseModel):
     species: str
     happiness: float
     energy: float
+    food: int = 0  # consumable for feeding
     level: int  # Now synchronized with user level
+    # XP progress within the current level (drives the level bar fill).
+    exp_into_level: int = 0
+    exp_for_next_level: int = 0
+    exp_progress: int = 0  # whole-number percentage 0-100
     last_fed: datetime
     last_played: datetime
     created_at: datetime

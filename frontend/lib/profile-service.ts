@@ -85,7 +85,7 @@ export async function fetchUserProfileFromBackend(
         profile_image_url:
           result.data.profile_image_url ||
           user.avatarUrl ||
-          "/avatars/placeholder.jpg",
+          "",
         role: result.data.role || user.role,
         level: result.data.current_level || 1, // Use actual level from backend
         learning_score: result.data.badges_earned || 0, // Use badges earned instead of learning score
@@ -127,6 +127,72 @@ export async function fetchUserProfileFromBackend(
     console.error("Error fetching profile from backend:", error);
     return null;
   }
+}
+
+export interface UpdateProfilePayload {
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+  bio?: string;
+}
+
+/**
+ * Persist edits to the current user's profile via the backend.
+ * Returns the updated profile, or throws an ApiError on failure.
+ */
+export async function updateUserProfileOnBackend(
+  user: User,
+  payload: UpdateProfilePayload
+): Promise<ProfileData | null> {
+  const userId = user.moodleId || user.id;
+  apiClient.setToken(user.token);
+
+  const result = await apiClient.request<any>(
+    `/auth/users/${userId}/profile`,
+    "PUT",
+    payload
+  );
+
+  // Bust the cache so the next read reflects the change.
+  profileCache.delete(String(userId));
+
+  if (result?.success && result.data) {
+    return result.data as ProfileData;
+  }
+  return null;
+}
+
+/**
+ * Step 1 of changing email: email a verification code to the new address.
+ * The address is not changed until confirmEmailChange() succeeds.
+ */
+export async function requestEmailChange(
+  user: User,
+  newEmail: string
+): Promise<{ success: boolean; message?: string }> {
+  apiClient.setToken(user.token);
+  return apiClient.request("/auth/change-email/request", "POST", {
+    new_email: newEmail,
+  });
+}
+
+/**
+ * Step 2 of changing email: confirm with the code sent to the new address.
+ * Returns the updated profile on success.
+ */
+export async function confirmEmailChange(
+  user: User,
+  code: string
+): Promise<ProfileData | null> {
+  const userId = user.moodleId || user.id;
+  apiClient.setToken(user.token);
+  const result = await apiClient.request<any>(
+    "/auth/change-email/confirm",
+    "POST",
+    { code }
+  );
+  profileCache.delete(String(userId));
+  return result?.success && result.data ? (result.data as ProfileData) : null;
 }
 
 /**
@@ -231,7 +297,7 @@ function createProfileFromMoodle(
     profile_image_url:
       moodleData.profileimageurl ||
       user.avatarUrl ||
-      "/avatars/placeholder.jpg",
+      "",
     role: user.role,
     level: user.level || 1,
     learning_score: 3,
@@ -270,7 +336,7 @@ function createDefaultProfile(user: User): ProfileData {
     first_name: user.username.split(".")[0] || "",
     last_name: user.username.split(".")[1] || "",
     email: user.email || `${user.username}@example.com`,
-    profile_image_url: user.avatarUrl || "/avatars/placeholder.jpg",
+    profile_image_url: user.avatarUrl || "",
     role: user.role,
     level: user.level || 1,
     learning_score: 3,

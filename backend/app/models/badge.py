@@ -39,7 +39,10 @@ class UserBadge(Base):
     awarded_at = Column(DateTime(timezone=True), server_default=func.now())  # Changed from 'earned_at'
     awarded_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)  # New field
     course_id = Column(Integer, ForeignKey("courses.id", ondelete="SET NULL"), nullable=True, index=True)  # New field
-    
+    # False until the student has seen the earn popup (lets missed/offline awards
+    # pop on their next visit).
+    popup_seen = Column(Boolean, nullable=False, server_default="false")
+
     # Relationships
     user = relationship("User", back_populates="earned_badges", foreign_keys=[user_id])
     badge = relationship("Badge", back_populates="user_badges")

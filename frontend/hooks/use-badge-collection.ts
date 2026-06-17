@@ -88,75 +88,62 @@ export function useBadgeCollection(userId?: number): BadgeCollectionReturn {
       }
 
       if (userId) {
-        // Fetch user's earned badges first
-        try {
-          const userEarnedBadges = await apiClient.getUserBadges(userId);
-          setUserBadges(userEarnedBadges);
+        // The earned-badges list and the progress summary are independent, so
+        // fetch them together instead of one after the other (one round-trip
+        // instead of two). allSettled keeps the existing graceful fallbacks.
+        const [userRes, progressRes] = await Promise.allSettled([
+          apiClient.getUserBadges(userId),
+          apiClient.getUserBadgeProgress(userId),
+        ]);
 
-          // Fetch user's badge progress using the comprehensive endpoint
-          try {
-            const progressData = await apiClient.getUserBadgeProgress(userId);
+        const userEarnedBadges =
+          userRes.status === "fulfilled" ? userRes.value : [];
+        if (userRes.status === "fulfilled") setUserBadges(userEarnedBadges);
 
-            const earnedBadgesList: UserBadgeProgress[] = (
-              progressData.earned_badges || []
-            ).map((item: any) => ({
-              badge: item.badge,
-              earned: true,
-              earnedAt: item.awarded_at,
-              progress: {
-                current: item.progress || item.progress_target || 1,
-                target:
-                  item.progress_target || item.badge?.criteria?.target || 1,
-                percentage: 100,
-              },
-            })); // Process available badges (these are not earned)
-            const availableBadgesList: UserBadgeProgress[] = (
-              progressData.available_badges || []
-            ).map((item: any) => ({
-              badge: item.badge,
-              earned: false,
-              earnedAt: undefined,
-              progress: {
-                current: item.progress || 0,
-                target:
-                  item.progress_target || item.badge?.criteria?.target || 1,
-                percentage: item.progress_percentage || 0,
-              },
-            }));
+        if (progressRes.status === "fulfilled") {
+          const progressData = progressRes.value;
 
-            // Combine earned and available badges
-            const allProgressBadges: UserBadgeProgress[] = [
-              ...earnedBadgesList,
-              ...availableBadgesList,
-            ];
-            setBadgeProgress(allProgressBadges);
-
-            const actualEarned = earnedBadgesList;
-            const actualAvailable = availableBadgesList;
-          } catch (progressError) {
-            // If progress endpoint doesn't exist, create basic progress data
-            const basicProgress: UserBadgeProgress[] = badges.map((badge) => {
-              const earnedBadge = userEarnedBadges.find(
-                (ub) => ub.badge_id === badge.badge_id
-              );
-              return {
-                badge,
-                earned: !!earnedBadge,
-                earnedAt: earnedBadge?.awarded_at,
-                progress: earnedBadge
-                  ? { current: 1, target: 1, percentage: 100 }
-                  : { current: 0, target: 1, percentage: 0 },
-              };
-            });
-            setBadgeProgress(basicProgress);
-          }
-        } catch (userError) {
-          // Create basic progress from just the badges
-          const basicProgress: UserBadgeProgress[] = badges.map((badge) => ({
-            badge,
-            earned: false,
-            progress: { current: 0, target: 1, percentage: 0 },
+          const earnedBadgesList: UserBadgeProgress[] = (
+            progressData.earned_badges || []
+          ).map((item: any) => ({
+            badge: item.badge,
+            earned: true,
+            earnedAt: item.awarded_at,
+            progress: {
+              current: item.progress || item.progress_target || 1,
+              target: item.progress_target || item.badge?.criteria?.target || 1,
+              percentage: 100,
+            },
           }));
+          const availableBadgesList: UserBadgeProgress[] = (
+            progressData.available_badges || []
+          ).map((item: any) => ({
+            badge: item.badge,
+            earned: false,
+            earnedAt: undefined,
+            progress: {
+              current: item.progress || 0,
+              target: item.progress_target || item.badge?.criteria?.target || 1,
+              percentage: item.progress_percentage || 0,
+            },
+          }));
+
+          setBadgeProgress([...earnedBadgesList, ...availableBadgesList]);
+        } else {
+          // Progress endpoint failed → basic progress from the earned list.
+          const basicProgress: UserBadgeProgress[] = badges.map((badge) => {
+            const earnedBadge = userEarnedBadges.find(
+              (ub) => ub.badge_id === badge.badge_id
+            );
+            return {
+              badge,
+              earned: !!earnedBadge,
+              earnedAt: earnedBadge?.awarded_at,
+              progress: earnedBadge
+                ? { current: 1, target: 1, percentage: 100 }
+                : { current: 0, target: 1, percentage: 0 },
+            };
+          });
           setBadgeProgress(basicProgress);
         }
       } else {

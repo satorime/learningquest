@@ -11,8 +11,12 @@ from app.database.connection import get_db
 from app.auth.dependencies import get_current_user_optional
 from app.models.user import User
 from app.services.quest_engagement_service import QuestEngagementService
+from app.utils.auth import get_role_required
 
-router = APIRouter(tags=["quest-analytics"])
+router = APIRouter(
+    tags=["quest-analytics"],
+    dependencies=[Depends(get_role_required("teacher"))],
+)
 
 @router.get("/quest/{quest_id}")
 async def get_quest_analytics(

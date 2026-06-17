@@ -2,7 +2,7 @@
 
 ## Overview
 
-Your MoodleQuest system uses **webhook-driven quest completion**, where Moodle sends events to your backend when users complete activities. I've integrated badge achievement detection directly into this webhook flow, ensuring badges are automatically checked and awarded whenever a quest is completed via webhook.
+Your LearningQuest system uses **webhook-driven quest completion**, where Moodle sends events to your backend when users complete activities. I've integrated badge achievement detection directly into this webhook flow, ensuring badges are automatically checked and awarded whenever a quest is completed via webhook.
 
 ## How It Works
 

@@ -19,7 +19,11 @@ class Quest(Base):
     start_date = Column(DateTime(timezone=True))
     end_date = Column(DateTime(timezone=True))
     is_active = Column(Boolean, default=True)
+    # Lifecycle: draft -> published -> archived
+    status = Column(String(20), nullable=False, server_default="draft")
     difficulty_level = Column(SmallInteger, default=1)
+    # Optional time limit (minutes) the student has once they start the quiz.
+    time_limit_minutes = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_updated = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     moodle_activity_id = Column(Integer, nullable=True, index=True)

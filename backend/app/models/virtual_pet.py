@@ -14,6 +14,8 @@ class VirtualPet(Base):
     species = Column(String(50), nullable=False)
     happiness = Column(Float, nullable=False, default=100.0)
     energy = Column(Float, nullable=False, default=100.0)
+    # Consumable earned from schoolwork; each feed consumes 1 food.
+    food = Column(Integer, nullable=False, default=0)
     level = Column(Integer, nullable=False, default=1)  # Now synchronized with user level
     last_fed = Column(DateTime(timezone=True), server_default=func.now())
     last_played = Column(DateTime(timezone=True), server_default=func.now())

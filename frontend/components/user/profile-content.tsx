@@ -1,5 +1,5 @@
-import { UserCourses } from "@/components/user/user-courses";
-import { UserCourseProgress } from "@/components/user/user-course-progress";
+import Link from "next/link";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -93,7 +93,7 @@ export function ProfileContent({ user }: ProfileContentProps) {
             <TabsList className="mb-4">
               <TabsTrigger value="courses">
                 <BookOpen className="h-4 w-4 mr-2" />
-                Courses
+                Classes
               </TabsTrigger>
               <TabsTrigger value="achievements">
                 <Trophy className="h-4 w-4 mr-2" />
@@ -106,12 +106,17 @@ export function ProfileContent({ user }: ProfileContentProps) {
             </TabsList>
             
             <TabsContent value="courses" className="space-y-6">
-              <UserCourseProgress userId={user.id} />
-              <UserCourses 
-                userId={user.id} 
-                showSync={user.id === (typeof window !== 'undefined' ? parseInt(localStorage.getItem('userId') || '0') : 0)}
-                limit={4}
-              />
+              <Card>
+                <CardHeader>
+                  <CardTitle>Classes</CardTitle>
+                  <CardDescription>Your enrolled classes live on your dashboard.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Button asChild variant="outline">
+                    <Link href="/dashboard/classes">Go to my classes</Link>
+                  </Button>
+                </CardContent>
+              </Card>
             </TabsContent>
             
             <TabsContent value="achievements">

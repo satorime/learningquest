@@ -22,7 +22,12 @@ export interface BadgeCriteria {
     | "equal";
   count?: number;
   course_id?: number;
-  description: string;
+  description?: string;
+  // Presentation hints for the in-app SVG medallion.
+  icon?: string;
+  color?: string;
+  shape?: "circle" | "shield" | "banner";
+  streak_type?: string;
 }
 
 export type BadgeCriteriaType =
@@ -32,6 +37,7 @@ export type BadgeCriteriaType =
   | "quest_completion_time"
   | "total_exp"
   | "level_reached"
+  | "pet_level"
   | "streak_days"
   | "perfect_scores"
   | "daily_quest_streak"
@@ -39,6 +45,7 @@ export type BadgeCriteriaType =
   | "grade_average"
   | "assignment_submission"
   | "participation"
+  | "manual"
   | "custom";
 
 export interface UserBadge {

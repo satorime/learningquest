@@ -36,6 +36,35 @@ class Badge(BadgeBase):
         from_attributes = True
 
 
+class CustomBadgeCreate(BaseModel):
+    """A teacher-defined badge rendered as an in-app SVG medallion."""
+    name: str
+    description: Optional[str] = None
+    icon: str = "award"               # symbol name (mapped to a Lucide glyph)
+    color: str = "amber"             # palette key
+    shape: str = "shield"            # circle | shield | banner
+    exp_value: int = 0
+
+
+class CustomBadgeUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
+    color: Optional[str] = None
+    shape: Optional[str] = None
+    exp_value: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class AwardBadgeRequest(BaseModel):
+    user_id: int
+    course_id: Optional[int] = None
+
+
+class AckBadgesRequest(BaseModel):
+    badge_ids: List[int] = []
+
+
 class UserBadgeBase(BaseModel):
     user_id: int
     badge_id: int

@@ -92,7 +92,7 @@ export function TeacherDashboard() {
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-2">
-        <h2 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-primary/80 to-primary bg-clip-text text-transparent">
+        <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-gradient-to-r from-primary/80 to-primary bg-clip-text text-transparent">
           Teacher Dashboard
         </h2>
         <p className="text-muted-foreground">
@@ -291,7 +291,7 @@ export function TeacherDashboard() {
                     </DialogDescription>
                   </DialogHeader>
                   <div className="grid gap-4 py-4">
-                    <div className="grid grid-cols-4 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
                       <div className="col-span-2">
                         <Label htmlFor="report-type">Report Type</Label>
                         <Select defaultValue="progress">

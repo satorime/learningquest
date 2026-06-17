@@ -1,88 +1,173 @@
-"use client"
+"use client";
 
-import type React from "react"
+import type React from "react";
 
-import { useState } from "react"
-import { useRouter } from "next/navigation"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { register } from "@/lib/auth"
+import { useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useAuth } from "@/lib/auth-context";
+import { GoogleSignInButton } from "@/components/auth/google-signin-button";
 
 export function RegisterForm() {
-  const router = useRouter()
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState("")
+  const router = useRouter();
+  const { register, verifyEmail, resendVerification, loginWithGoogle } = useAuth();
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  // verification step
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [info, setInfo] = useState("");
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setIsLoading(true)
-    setError("")
+    event.preventDefault();
+    setIsLoading(true);
+    setError("");
 
-    const formData = new FormData(event.currentTarget)
-    const name = formData.get("name") as string
-    const email = formData.get("email") as string
-    const password = formData.get("password") as string
+    const formData = new FormData(event.currentTarget);
+    const data = {
+      first_name: (formData.get("first_name") as string)?.trim(),
+      last_name: (formData.get("last_name") as string)?.trim(),
+      username: (formData.get("username") as string)?.trim(),
+      email: (formData.get("email") as string)?.trim(),
+      password: formData.get("password") as string,
+    };
 
     try {
-      // This would call your actual registration API
-      const result = await register({ name, email, password })
-
-      if (result.success) {
-        router.push("/dashboard")
+      const result = await register(data);
+      if (result.success && result.email) {
+        setPendingEmail(result.email);
+        setInfo(result.message || "We emailed you a verification code.");
       } else {
-        setError(result.error || "Registration failed. Please try again.")
+        setError(result.error || "Registration failed. Please try again.");
       }
-    } catch (error) {
-      setError("An error occurred. Please try again.")
+    } catch {
+      setError("An error occurred. Please try again.");
     } finally {
-      setIsLoading(false)
+      setIsLoading(false);
     }
   }
 
+  async function onVerify(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!pendingEmail) return;
+    setIsLoading(true);
+    setError("");
+    try {
+      const result = await verifyEmail(pendingEmail, code.trim());
+      if (result.success) {
+        router.push("/dashboard");
+      } else {
+        setError(result.error || "Invalid code.");
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function onResend() {
+    if (!pendingEmail) return;
+    setError("");
+    const res = await resendVerification(pendingEmail);
+    setInfo(res.message || "A new code was sent.");
+  }
+
+  const handleGoogle = useCallback(
+    async (idToken: string) => {
+      setIsLoading(true);
+      setError("");
+      try {
+        const result = await loginWithGoogle(idToken);
+        if (result.success) {
+          router.push("/dashboard");
+        } else {
+          setError(result.error || "Google sign-up failed");
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [loginWithGoogle, router]
+  );
+
+  // --- verification step ---
+  if (pendingEmail) {
+    return (
+      <div className="grid gap-4">
+        <div className="text-center">
+          <p className="text-sm text-muted-foreground">
+            Enter the 6-digit code sent to <strong>{pendingEmail}</strong>
+          </p>
+        </div>
+        {info && <div className="text-center text-xs text-green-600">{info}</div>}
+        <form onSubmit={onVerify} className="grid gap-4">
+          <div className="grid gap-2">
+            <Label htmlFor="code">Verification code</Label>
+            <Input
+              id="code"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              placeholder="123456"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              maxLength={6}
+              className="text-center text-lg tracking-widest"
+              disabled={isLoading}
+              required
+            />
+          </div>
+          {error && <div className="text-sm text-red-500">{error}</div>}
+          <Button type="submit" disabled={isLoading || code.length < 4} className="w-full">
+            {isLoading ? "Verifying..." : "Verify & continue"}
+          </Button>
+        </form>
+        <button
+          type="button"
+          onClick={onResend}
+          className="text-center text-sm text-muted-foreground underline-offset-4 hover:underline"
+        >
+          Resend code
+        </button>
+      </div>
+    );
+  }
+
+  // --- registration step ---
   return (
     <div className="grid gap-6">
       <form onSubmit={onSubmit}>
         <div className="grid gap-4">
+          <div className="grid grid-cols-2 gap-2">
+            <div className="grid gap-2">
+              <Label htmlFor="first_name">First Name</Label>
+              <Input id="first_name" name="first_name" type="text"
+                autoComplete="given-name" disabled={isLoading} required />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="last_name">Last Name</Label>
+              <Input id="last_name" name="last_name" type="text"
+                autoComplete="family-name" disabled={isLoading} required />
+            </div>
+          </div>
           <div className="grid gap-2">
-            <Label htmlFor="name">Full Name</Label>
-            <Input
-              id="name"
-              name="name"
-              placeholder="John Doe"
-              type="text"
-              autoCapitalize="words"
-              autoComplete="name"
-              autoCorrect="off"
-              disabled={isLoading}
-              required
-            />
+            <Label htmlFor="username">Username</Label>
+            <Input id="username" name="username" type="text"
+              autoCapitalize="none" autoComplete="username" minLength={3}
+              disabled={isLoading} required />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="email">Email</Label>
-            <Input
-              id="email"
-              name="email"
-              placeholder="name@example.com"
-              type="email"
-              autoCapitalize="none"
-              autoComplete="email"
-              autoCorrect="off"
-              disabled={isLoading}
-              required
-            />
+            <Input id="email" name="email" placeholder="name@example.com"
+              type="email" autoCapitalize="none" autoComplete="email"
+              autoCorrect="off" disabled={isLoading} required />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="password">Password</Label>
-            <Input
-              id="password"
-              name="password"
-              type="password"
-              autoCapitalize="none"
-              autoComplete="new-password"
-              disabled={isLoading}
-              required
-            />
+            <Input id="password" name="password" type="password"
+              autoComplete="new-password" minLength={8}
+              disabled={isLoading} required />
           </div>
           {error && <div className="text-sm text-red-500">{error}</div>}
           <Button disabled={isLoading} type="submit" className="w-full">
@@ -95,50 +180,12 @@ export function RegisterForm() {
           <span className="w-full border-t" />
         </div>
         <div className="relative flex justify-center text-xs uppercase">
-          <span className="bg-background px-2 text-muted-foreground">Or continue with</span>
+          <span className="bg-background px-2 text-muted-foreground">
+            Or continue with
+          </span>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
-        <Button variant="outline" disabled={isLoading} onClick={() => {}}>
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="mr-2 h-4 w-4"
-          >
-            <circle cx="12" cy="12" r="10" />
-            <circle cx="12" cy="12" r="4" />
-            <line x1="21.17" x2="12" y1="8" y2="8" />
-            <line x1="3.95" x2="8.54" y1="6.06" y2="14" />
-            <line x1="10.88" x2="15.46" y1="21.94" y2="14" />
-          </svg>
-          Google
-        </Button>
-        <Button variant="outline" disabled={isLoading} onClick={() => {}}>
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="mr-2 h-4 w-4"
-          >
-            <path d="M12 20.94c1.5 0 2.75 1.06 4 1.06 3 0 6-8 6-12.22A4.91 4.91 0 0 0 17 5c-2.22 0-4 1.44-5 2-1-.56-2.78-2-5-2a4.9 4.9 0 0 0-5 4.78C2 14 5 22 8 22c1.25 0 2.5-1.06 4-1.06Z" />
-            <path d="M10 2c1 .5 2 2 2 5" />
-          </svg>
-          Apple
-        </Button>
-      </div>
+      <GoogleSignInButton onCredential={handleGoogle} text="signup_with" />
     </div>
-  )
+  );
 }

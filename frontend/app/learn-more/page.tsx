@@ -30,20 +30,20 @@ export default function LearnMorePage() {
         <div className="text-center mb-12">
           <div className="flex items-center justify-center gap-2 mb-3">
             <BookOpen className="h-6 w-6 text-primary" />
-            <h1 className="text-3xl font-bold tracking-tight">MoodleQuest</h1>
+            <h1 className="text-3xl font-bold tracking-tight">LearningQuest</h1>
           </div>
           <h2 className="text-3xl font-bold mb-4">Frequently Asked Questions</h2>
           <p className="text-muted-foreground max-w-2xl mx-auto">
-            Learn more about how MoodleQuest enhances your Moodle learning experience through gamification and personalized learning paths.
+            Learn more about how LearningQuest enhances your Moodle learning experience through gamification and personalized learning paths.
           </p>
         </div>
 
         <Accordion type="single" collapsible className="w-full bg-background/80 backdrop-blur-sm rounded-lg border p-6 shadow-sm">
           <AccordionItem value="item-1">
-            <AccordionTrigger className="text-lg font-medium">What is MoodleQuest?</AccordionTrigger>
+            <AccordionTrigger className="text-lg font-medium">What is LearningQuest?</AccordionTrigger>
             <AccordionContent>
               <p className="text-muted-foreground mb-3">
-                MoodleQuest is a gamified learning platform that enhances your Moodle experience. It transforms traditional learning into an engaging adventure with:
+                LearningQuest is a gamified learning platform that enhances your Moodle experience. It transforms traditional learning into an engaging adventure with:
               </p>
               <ul className="space-y-2 ml-1">
                 <li className="flex items-start gap-2">
@@ -63,16 +63,16 @@ export default function LearnMorePage() {
           </AccordionItem>
 
           <AccordionItem value="item-2">
-            <AccordionTrigger className="text-lg font-medium">How does MoodleQuest work with my institution's Moodle?</AccordionTrigger>
+            <AccordionTrigger className="text-lg font-medium">How does LearningQuest work with my institution's Moodle?</AccordionTrigger>
             <AccordionContent>
-              MoodleQuest integrates directly with your institution's Moodle system using secure authentication. It accesses your course content, assignments, and progress while adding gamification elements. Your Moodle credentials are securely used for authentication, and all your progress in MoodleQuest is synchronized back to your Moodle account.
+              LearningQuest integrates directly with your institution's Moodle system using secure authentication. It accesses your course content, assignments, and progress while adding gamification elements. Your Moodle credentials are securely used for authentication, and all your progress in LearningQuest is synchronized back to your Moodle account.
             </AccordionContent>
           </AccordionItem>
 
           <AccordionItem value="item-3">
-            <AccordionTrigger className="text-lg font-medium">What are the benefits of using MoodleQuest?</AccordionTrigger>
+            <AccordionTrigger className="text-lg font-medium">What are the benefits of using LearningQuest?</AccordionTrigger>
             <AccordionContent>
-              <p className="text-muted-foreground mb-3">MoodleQuest provides numerous benefits for learners:</p>
+              <p className="text-muted-foreground mb-3">LearningQuest provides numerous benefits for learners:</p>
               <ul className="space-y-2 ml-1">
                 <li className="flex items-start gap-2">
                   <CheckCircle className="h-5 w-5 text-green-500 mt-0.5 flex-shrink-0" />
@@ -95,7 +95,7 @@ export default function LearnMorePage() {
           </AccordionItem>
 
           <AccordionItem value="item-4">
-            <AccordionTrigger className="text-lg font-medium">How do I get started with MoodleQuest?</AccordionTrigger>
+            <AccordionTrigger className="text-lg font-medium">How do I get started with LearningQuest?</AccordionTrigger>
             <AccordionContent>
               Getting started is easy! Simply sign in with your existing Moodle credentials. After signing in for the first time, you'll create your profile, choose your virtual pet, and begin your learning journey. All your existing Moodle courses will be available in a new, gamified format.
               <div className="mt-4">

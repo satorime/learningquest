@@ -9,7 +9,7 @@ export function TestimonialsSection() {
             </div>
             <h2 className="text-3xl font-bold tracking-tighter sm:text-5xl">What Our Users Say</h2>
             <p className="max-w-[900px] text-gray-500 md:text-xl/relaxed lg:text-base/relaxed xl:text-xl/relaxed dark:text-gray-400">
-              Hear from students and educators who have transformed their learning experience with MoodleQuest.
+              Hear from students and educators who have transformed their learning experience with LearningQuest.
             </p>
           </div>
         </div>
@@ -21,7 +21,7 @@ export function TestimonialsSection() {
                 <div className="text-sm text-gray-500 dark:text-gray-400">Student</div>
               </div>
               <div className="mt-4 text-gray-500 dark:text-gray-400">
-                "MoodleQuest completely changed how I approach my online courses. The quest system makes me excited to
+                "LearningQuest completely changed how I approach my online courses. The quest system makes me excited to
                 complete assignments, and I love seeing my progress visually!"
               </div>
             </div>
@@ -48,7 +48,7 @@ export function TestimonialsSection() {
                 <div className="text-sm text-gray-500 dark:text-gray-400">Teacher</div>
               </div>
               <div className="mt-4 text-gray-500 dark:text-gray-400">
-                "As an educator, I've seen a dramatic increase in student engagement since implementing MoodleQuest. The
+                "As an educator, I've seen a dramatic increase in student engagement since implementing LearningQuest. The
                 analytics help me identify struggling students early and provide targeted support."
               </div>
             </div>
@@ -75,7 +75,7 @@ export function TestimonialsSection() {
                 <div className="text-sm text-gray-500 dark:text-gray-400">School Administrator</div>
               </div>
               <div className="mt-4 text-gray-500 dark:text-gray-400">
-                "MoodleQuest has revolutionized our online learning program. Students are more motivated, completion
+                "LearningQuest has revolutionized our online learning program. Students are more motivated, completion
                 rates have improved, and our teachers have better insights into student performance."
               </div>
             </div>

@@ -16,7 +16,6 @@ import {
   Sparkles,
   LogIn
 } from "lucide-react"
-import { SimplifiedMoodleForm } from "@/components/auth/simplified-moodle-form"
 import { useAuth } from "@/lib/auth-context"
 import { cn } from "@/lib/utils"
 
@@ -79,8 +78,13 @@ function BottomSignIn() {
                 ✕
               </Button>
             </div>
-            <div className="w-72">
-              <SimplifiedMoodleForm />
+            <div className="w-72 space-y-2">
+              <Button asChild className="w-full">
+                <Link href="/signin">Sign in</Link>
+              </Button>
+              <Button asChild variant="outline" className="w-full">
+                <Link href="/register">Create an account</Link>
+              </Button>
             </div>
           </motion.div>
         )}
@@ -468,7 +472,7 @@ export default function LandingPage() {
             </motion.h1>
             
             <motion.p variants={itemVariants} className="text-base md:text-lg text-muted-foreground">
-              MoodleQuest is the gamified learning platform that brings excitement to education. 
+              LearningQuest is the gamified learning platform that brings excitement to education. 
               Complete quests, earn experience, and level up your knowledge every day.
             </motion.p>
             
@@ -737,7 +741,7 @@ export default function LandingPage() {
           <div>
             <div className="flex items-center gap-2 md:gap-3 mb-4 md:mb-6">
               <Trophy className="h-5 w-5 md:h-6 md:w-6 text-orange-500" />
-              <h2 className="text-2xl md:text-3xl font-bold">MoodleQuest Winners</h2>
+              <h2 className="text-2xl md:text-3xl font-bold">LearningQuest Winners</h2>
             </div>
 
             <div className="bg-background/80 backdrop-blur-md rounded-xl md:rounded-3xl border shadow-lg p-4 md:p-6 space-y-4 relative overflow-hidden">

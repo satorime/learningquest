@@ -12,7 +12,7 @@ export function HeroSection() {
                 Transform Learning into an Adventure
               </h1>
               <p className="max-w-[600px] text-gray-500 md:text-xl dark:text-gray-400">
-                MoodleQuest turns traditional text-based learning into an immersive, gamified experience that keeps
+                LearningQuest turns traditional text-based learning into an immersive, gamified experience that keeps
                 students engaged and motivated.
               </p>
             </div>

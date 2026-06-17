@@ -22,33 +22,37 @@ class DailyQuestService:
         """
         results = []
         
-        # Quest templates to create
+        # Study-habit daily quests. Each grants food (the pet-feeding consumable)
+        # in addition to XP, to tie daily studying to caring for the pet.
         quest_templates = [
             {
                 "quest_type": QuestTypeEnum.DAILY_LOGIN.value,
-                "title": "Daily Login",
-                "description": "Log in to MoodleQuest to start your daily adventure!",
+                "title": "Daily Check-In",
+                "description": "Show up to learn — log in today to keep your study habit going!",
                 "xp_reward": 10,
+                "additional_rewards": {"food": 2},
                 "target_count": 1,
                 "criteria": {"action": "login", "count": 1},
                 "priority": 1,
                 "difficulty_level": 1
             },
             {
-                "quest_type": QuestTypeEnum.FEED_PET.value,
-                "title": "Feed Your Pet",
-                "description": "Give your virtual pet some love and care by feeding it!",
+                "quest_type": QuestTypeEnum.COMPLETE_QUIZ.value,
+                "title": "Knowledge Check",
+                "description": "Complete any quiz or assignment from your classes today.",
                 "xp_reward": 15,
+                "additional_rewards": {"food": 2},
                 "target_count": 1,
-                "criteria": {"action": "feed_pet", "count": 1},
+                "criteria": {"action": "complete_quiz", "count": 1},
                 "priority": 2,
                 "difficulty_level": 1
             },
             {
                 "quest_type": QuestTypeEnum.EARN_XP.value,
-                "title": "Earn Experience",
-                "description": "Complete activities and earn XP to level up your learning journey!",
+                "title": "Keep Studying",
+                "description": "Earn 50 XP from your learning activities today.",
                 "xp_reward": 25,
+                "additional_rewards": {"food": 2},
                 "target_count": 50,  # Need to earn 50 XP from other activities
                 "criteria": {"action": "earn_xp", "count": 50},
                 "priority": 3,
@@ -57,41 +61,50 @@ class DailyQuestService:
         ]
 
         for template_data in quest_templates:
-            # Check if quest already exists
+            # Upsert: update existing templates so re-seeding refreshes copy/rewards.
             existing_quest = self.db.query(DailyQuest).filter(
                 DailyQuest.quest_type == template_data["quest_type"]
             ).first()
 
-            if existing_quest:
-                logger.info(f"Quest template {template_data['quest_type']} already exists")
-                results.append({
-                    "quest_type": template_data["quest_type"],
-                    "success": True,
-                    "message": f"Quest template {template_data['quest_type']} already exists",
-                    "quest_id": existing_quest.quest_id
-                })
-                continue
-
-            # Create the quest template
-            daily_quest = DailyQuest(
-                quest_type=template_data["quest_type"],
-                title=template_data["title"],
-                description=template_data["description"],
-                xp_reward=template_data["xp_reward"],
-                target_count=template_data["target_count"],
-                criteria=template_data["criteria"],
-                is_active=True,
-                priority=template_data["priority"],
-                difficulty_level=template_data["difficulty_level"],
-                created_at=datetime.utcnow(),
-                last_updated=datetime.utcnow()
-            )
-
             try:
+                if existing_quest:
+                    existing_quest.title = template_data["title"]
+                    existing_quest.description = template_data["description"]
+                    existing_quest.xp_reward = template_data["xp_reward"]
+                    existing_quest.additional_rewards = template_data["additional_rewards"]
+                    existing_quest.target_count = template_data["target_count"]
+                    existing_quest.criteria = template_data["criteria"]
+                    existing_quest.priority = template_data["priority"]
+                    existing_quest.difficulty_level = template_data["difficulty_level"]
+                    existing_quest.is_active = True
+                    existing_quest.last_updated = datetime.utcnow()
+                    self.db.commit()
+                    results.append({
+                        "quest_type": template_data["quest_type"],
+                        "success": True,
+                        "message": "Quest template updated",
+                        "quest_id": existing_quest.quest_id
+                    })
+                    continue
+
+                daily_quest = DailyQuest(
+                    quest_type=template_data["quest_type"],
+                    title=template_data["title"],
+                    description=template_data["description"],
+                    xp_reward=template_data["xp_reward"],
+                    additional_rewards=template_data["additional_rewards"],
+                    target_count=template_data["target_count"],
+                    criteria=template_data["criteria"],
+                    is_active=True,
+                    priority=template_data["priority"],
+                    difficulty_level=template_data["difficulty_level"],
+                    created_at=datetime.utcnow(),
+                    last_updated=datetime.utcnow()
+                )
                 self.db.add(daily_quest)
                 self.db.commit()
                 self.db.refresh(daily_quest)
-                
+
                 logger.info(f"Created quest template {template_data['quest_type']} with ID: {daily_quest.quest_id}")
                 results.append({
                     "quest_type": template_data["quest_type"],
@@ -107,6 +120,19 @@ class DailyQuestService:
                     "success": False,
                     "message": f"Error creating quest template: {str(e)}"
                 })
+
+        # Retire any legacy templates not in the study set (e.g. feed_pet) so
+        # they stop being generated for students.
+        study_types = [t["quest_type"] for t in quest_templates]
+        try:
+            self.db.query(DailyQuest).filter(
+                DailyQuest.quest_type.notin_(study_types),
+                DailyQuest.is_active == True,
+            ).update({DailyQuest.is_active: False}, synchronize_session=False)
+            self.db.commit()
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error retiring legacy quest templates: {e}")
 
         return {
             "success": True,
@@ -243,11 +269,12 @@ class DailyQuestService:
 
         try:
             self.db.commit()
+            self._award_quest_food(user_id, user_quest.daily_quest)
             logger.info(f"Completed daily login quest for user {user_id}, awarded {user_quest.daily_quest.xp_reward} XP")
-            
+
             # Check for badge achievements after quest completion
             self._check_badges_after_quest_completion(user_id)
-            
+
             return {
                 "success": True,
                 "message": "Daily login quest completed successfully!",
@@ -267,7 +294,8 @@ class DailyQuestService:
         return self.db.query(UserDailyQuest).join(DailyQuest).filter(
             and_(
                 UserDailyQuest.user_id == user_id,
-                cast(UserDailyQuest.quest_date, Date) == target_date
+                cast(UserDailyQuest.quest_date, Date) == target_date,
+                DailyQuest.is_active == True,  # hide retired templates (e.g. feed_pet)
             )
         ).order_by(DailyQuest.priority.desc()).all()
 
@@ -491,12 +519,13 @@ class DailyQuestService:
                 self._update_user_streak(user_id)
             
             self.db.commit()
-            
+            self._award_quest_food(user_id, user_quest.daily_quest)
+
             logger.info(f"User {user_id} completed {quest_type} quest and earned {user_quest.daily_quest.xp_reward} XP")
-            
+
             # Check for badge achievements after quest completion
             self._check_badges_after_quest_completion(user_id)
-            
+
             return {
                 "success": True,
                 "message": f"{quest_type.replace('_', ' ').title()} quest completed successfully!",
@@ -573,9 +602,10 @@ class DailyQuestService:
             
             try:
                 self.db.commit()
-                
+                self._award_quest_food(user_id, user_quest.daily_quest)
+
                 logger.info(f"User {user_id} completed earn XP quest and earned {user_quest.daily_quest.xp_reward} bonus XP")
-                
+
                 # Check for badge achievements after quest completion
                 self._check_badges_after_quest_completion(user_id)
                 
@@ -604,6 +634,19 @@ class DailyQuestService:
                 self.db.rollback()
                 logger.error(f"Error updating earn XP quest progress for user {user_id}: {e}")
                 raise
+
+    def _award_quest_food(self, user_id: int, daily_quest) -> int:
+        """Grant the quest's food reward (from additional_rewards) to the pet."""
+        try:
+            food = 0
+            if daily_quest and daily_quest.additional_rewards:
+                food = daily_quest.additional_rewards.get("food", 0) or 0
+            if food:
+                from app.services.pet_service import add_food
+                return add_food(self.db, user_id, food)
+        except Exception as e:  # noqa: BLE001 - food reward is best-effort
+            logger.warning(f"Could not award quest food to user {user_id}: {e}")
+        return 0
 
     def _award_xp_to_user(self, user_id: int, xp_amount: int):
         """Award XP to a user and create an experience points record."""

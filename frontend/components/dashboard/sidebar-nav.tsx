@@ -78,7 +78,7 @@ export function SidebarNav() {
           className="flex items-center gap-2 font-semibold"
         >
           <Trophy className="h-6 w-6" />
-          <span className="text-xl">MoodleQuest</span>
+          <span className="text-xl">LearningQuest</span>
         </Link>
       </div>
       <ScrollArea className="flex-1 py-4">

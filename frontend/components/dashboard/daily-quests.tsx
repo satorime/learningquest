@@ -12,7 +12,7 @@ import {
   type DailyQuestSummary,
   type UserDailyQuest,
 } from "@/lib/api-client";
-import { useCurrentUser } from "@/hooks/useCurrentMoodleUser";
+import { useCurrentUser } from "@/hooks/use-current-user";
 import { useGlobalXPReward } from "@/contexts/xp-reward-context";
 import toast from "react-hot-toast";
 

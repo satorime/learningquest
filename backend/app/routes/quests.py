@@ -13,13 +13,26 @@ from app.services.activity_log_service import log_activity
 from datetime import datetime
 import random
 from datetime import datetime, timedelta
-from app.utils.auth import get_current_user
+from app.utils.auth import get_current_user, get_current_active_user
 
 router = APIRouter(
     prefix="/quests",
     tags=["quests"],
     responses={404: {"description": "Not found"}},
 )
+
+
+def _authorize_user_access(db: Session, user_id: int, current_user: UserModel) -> UserModel:
+    """Resolve a target user by internal id; only self or teacher/admin may access."""
+    is_self = current_user.id == user_id
+    if not (is_self or current_user.role in ("teacher", "admin")):
+        raise HTTPException(status_code=403, detail="Not authorized to access this user")
+    if is_self:
+        return current_user
+    user = db.query(UserModel).filter(UserModel.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
 
 @router.post("/", response_model=QuestSchema, status_code=status.HTTP_201_CREATED)
 def create_quest(quest: QuestCreate, creator_id: int = Query(..., description="ID of the user creating the quest"), db: Session = Depends(get_db)):
@@ -491,15 +504,18 @@ def get_assigned_activity_ids(db: Session = Depends(get_db)):
     return [activity_id[0] for activity_id in assigned_ids]
 
 @router.get("/for-user/{user_id}")
-def get_quests_for_user(user_id: int, db: Session = Depends(get_db)):
+def get_quests_for_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_active_user),
+):
     """
     Get all quests for a specific user based on their enrolled courses.
     Returns quests with completion status, progress, and organized by completion state.
+    The user_id is the internal user id.
     """
-    try:        # Verify user exists and get local user ID
-        user = db.query(UserModel).filter(UserModel.moodle_user_id == user_id).first() 
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+    try:
+        user = _authorize_user_access(db, user_id, current_user)
         
         # Get all courses the user is enrolled in using the local user ID
         user_enrollments = db.query(CourseEnrollment).filter(
@@ -664,17 +680,19 @@ def get_quests_for_user(user_id: int, db: Session = Depends(get_db)):
         )
 
 @router.get("/student-progress/{user_id}")
-def get_student_progress(user_id: int, db: Session = Depends(get_db)):
+def get_student_progress(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_active_user),
+):
     """
     Get student progress including total EXP and quests completed for a specific user.
-    The user_id parameter is the Moodle user ID.
+    The user_id is the internal user id. Only self or teacher/admin may access.
     Aggregates data from multiple StudentProgress records for the same user.
     """
     try:
-        # Find the local user by moodle_user_id
-        user = db.query(UserModel).filter(UserModel.moodle_user_id == user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")        # Get all student progress records for this user and aggregate the data
+        user = _authorize_user_access(db, user_id, current_user)
+        # Get all student progress records for this user and aggregate the data
         from sqlalchemy import func
         from app.models.badge import UserBadge
         

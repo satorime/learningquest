@@ -1,5 +1,5 @@
 // Virtual Pet API service functions
-import { apiClient } from "./api-client";
+import { apiClient, isApiError } from "./api-client";
 
 export interface VirtualPetData {
   pet_id: number;
@@ -7,7 +7,11 @@ export interface VirtualPetData {
   species: string;
   happiness: number;
   energy: number;
+  food?: number;
   level: number;
+  exp_into_level?: number;
+  exp_for_next_level?: number;
+  exp_progress?: number; // whole-number percentage 0-100
   last_fed: string;
   last_played: string;
   created_at: string;
@@ -38,7 +42,7 @@ export async function getMyPet(): Promise<VirtualPetResponse> {
     console.error("Error fetching pet:", error);
 
     // Handle 404 as a normal case for users without pets
-    if (error instanceof Error && error.message.includes("404")) {
+    if (isApiError(error, 404)) {
       console.log(
         "No pet found for user (404) - this is normal for first-time users"
       );
@@ -50,7 +54,7 @@ export async function getMyPet(): Promise<VirtualPetResponse> {
     }
 
     // Handle 401 as authentication issue
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       console.log("Not authenticated (401) - user may need to log in");
       return {
         success: false,
@@ -93,14 +97,14 @@ export async function createPet(
   } catch (error) {
     console.error("Error creating pet:", error);
 
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       return {
         success: false,
         message: "Authentication required - please log in to create a pet",
       };
     }
 
-    if (error instanceof Error && error.message.includes("400")) {
+    if (isApiError(error, 400)) {
       return {
         success: false,
         message: "You already have a pet. You can only have one pet at a time.",
@@ -136,14 +140,14 @@ export async function updatePetName(name: string): Promise<VirtualPetResponse> {
   } catch (error) {
     console.error("Error updating pet name:", error);
 
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       return {
         success: false,
         message: "Authentication required - please log in to update pet name",
       };
     }
 
-    if (error instanceof Error && error.message.includes("404")) {
+    if (isApiError(error, 404)) {
       return {
         success: false,
         message: "No pet found - please create a pet first",
@@ -172,14 +176,14 @@ export async function deletePet(): Promise<VirtualPetResponse> {
     console.error("Error deleting pet:", error);
 
     // Handle 401 as authentication issue
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       return {
         success: false,
         message: "Authentication required - please log in to delete pet",
       };
     }
 
-    if (error instanceof Error && error.message.includes("404")) {
+    if (isApiError(error, 404)) {
       return {
         success: false,
         message: "No pet found to delete",
@@ -194,10 +198,6 @@ export async function deletePet(): Promise<VirtualPetResponse> {
     };
   }
 }
-
-// NEW API FUNCTIONS USING MOODLE TOKEN AUTHENTICATION
-
-import { debugVirtualPetAuth } from "./debug-virtual-pet";
 
 export interface PetCheckResponse {
   has_pet: boolean;
@@ -239,8 +239,6 @@ export async function checkUserHasPet(): Promise<{
   message?: string;
 }> {
   try {
-    debugVirtualPetAuth(); // Add debugging information
-
     const data = await apiClient.request<PetCheckResponse>(
       "/virtual-pet/check-pet",
       "GET"
@@ -253,7 +251,7 @@ export async function checkUserHasPet(): Promise<{
   } catch (error) {
     console.error("❌ Error checking pet status:", error);
 
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       return {
         success: false,
         message: "Authentication required - please log in",
@@ -284,7 +282,7 @@ export async function getUserPet(): Promise<VirtualPetResponse> {
     console.error("Error fetching pet:", error);
 
     // Handle 404 as a normal case for users without pets
-    if (error instanceof Error && error.message.includes("404")) {
+    if (isApiError(error, 404)) {
       console.log(
         "No pet found for user (404) - this is normal for first-time users"
       );
@@ -296,7 +294,7 @@ export async function getUserPet(): Promise<VirtualPetResponse> {
     }
 
     // Handle 401 as authentication issue
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       console.log("Not authenticated (401) - user may need to log in");
       return {
         success: false,
@@ -339,14 +337,14 @@ export async function createUserPet(
   } catch (error) {
     console.error("Error creating pet:", error);
 
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       return {
         success: false,
         message: "Authentication required - please log in to create a pet",
       };
     }
 
-    if (error instanceof Error && error.message.includes("400")) {
+    if (isApiError(error, 400)) {
       return {
         success: false,
         message: "You already have a pet. You can only have one pet at a time.",
@@ -374,7 +372,7 @@ export async function syncPetLevel(): Promise<LevelSyncResponse> {
   } catch (error) {
     console.error("Error syncing pet level:", error);
 
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       return {
         success: false,
         message: "Authentication required - please log in to sync pet level",
@@ -386,7 +384,7 @@ export async function syncPetLevel(): Promise<LevelSyncResponse> {
       };
     }
 
-    if (error instanceof Error && error.message.includes("404")) {
+    if (isApiError(error, 404)) {
       return {
         success: false,
         message: "No pet found - please create a pet first",
@@ -424,7 +422,7 @@ export async function getAvailableAccessories(): Promise<AccessoriesListResponse
   } catch (error) {
     console.error("Error getting available accessories:", error);
 
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       return {
         success: false,
         message: "Authentication required - please log in to view accessories",
@@ -472,21 +470,21 @@ export async function equipAccessory(
   } catch (error) {
     console.error("Error equipping accessory:", error);
 
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       return {
         success: false,
         message: "Authentication required - please log in to equip accessories",
       };
     }
 
-    if (error instanceof Error && error.message.includes("404")) {
+    if (isApiError(error, 404)) {
       return {
         success: false,
         message: "Accessory not found",
       };
     }
 
-    if (error instanceof Error && error.message.includes("400")) {
+    if (isApiError(error, 400)) {
       return {
         success: false,
         message: "Level requirement not met for this accessory",
@@ -496,6 +494,52 @@ export async function equipAccessory(
     return {
       success: false,
       message: `Failed to equip accessory: ${
+        error instanceof Error ? error.message : "Unknown error"
+      }`,
+    };
+  }
+}
+
+export interface PetInteractionResult {
+  success: boolean;
+  message?: string;
+  pet_stats?: {
+    happiness: number;
+    energy: number;
+    food?: number;
+  };
+}
+
+// Feed the pet (persists energy/happiness on the backend)
+export async function feedPet(): Promise<PetInteractionResult> {
+  try {
+    return await apiClient.request<PetInteractionResult>(
+      "/virtual-pet/feed",
+      "POST"
+    );
+  } catch (error) {
+    console.error("Error feeding pet:", error);
+    return {
+      success: false,
+      message: `Failed to feed pet: ${
+        error instanceof Error ? error.message : "Unknown error"
+      }`,
+    };
+  }
+}
+
+// Play with the pet (persists energy/happiness on the backend)
+export async function playWithPet(): Promise<PetInteractionResult> {
+  try {
+    return await apiClient.request<PetInteractionResult>(
+      "/virtual-pet/play",
+      "POST"
+    );
+  } catch (error) {
+    console.error("Error playing with pet:", error);
+    return {
+      success: false,
+      message: `Failed to play with pet: ${
         error instanceof Error ? error.message : "Unknown error"
       }`,
     };
@@ -521,7 +565,7 @@ export async function getEquippedAccessories(): Promise<{
   } catch (error) {
     console.error("Error getting equipped accessories:", error);
 
-    if (error instanceof Error && error.message.includes("401")) {
+    if (isApiError(error, 401)) {
       return {
         success: false,
         equipped_accessories: [],

@@ -1,56 +1,29 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, validator
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 
 
-class UserBase(BaseModel):
+# --- Core user / token shapes ----------------------------------------------
+class UserResponse(BaseModel):
+    id: int
     username: str
     email: Optional[EmailStr] = None
     role: str
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     is_active: bool = True
-
-
-class UserCreate(UserBase):
-    password: Optional[str] = None
-    moodle_user_id: Optional[int] = None
-    user_token: Optional[str] = None
-
-
-class UserResponse(UserBase):
-    id: int
-    moodle_user_id: Optional[int] = None
+    auth_provider: Optional[str] = "local"
     profile_image_url: Optional[str] = None
     bio: Optional[str] = None
-    created_at: datetime
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
 
 
-class UserLogin(BaseModel):
-    username: str
-    password: str
-    service: Optional[str] = "modquest"
-
-
-class StoreUserRequest(BaseModel):
-    moodleId: int
-    username: str
-    email: EmailStr
-    firstName: str
-    lastName: str
-    token: str
-    privateToken: Optional[str] = None
-    role: Optional[str] = "student"
-    profileImageUrl: Optional[str] = None
-    bio: Optional[str] = None
-
-
 class Token(BaseModel):
     access_token: str
-    token_type: str
+    token_type: str = "bearer"
     expires_in: int
     refresh_token: Optional[str] = None
     user: UserResponse
@@ -61,31 +34,101 @@ class TokenData(BaseModel):
     user_id: Optional[int] = None
 
 
+# --- Native auth requests ---------------------------------------------------
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=100)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    first_name: str = Field(min_length=1, max_length=100)
+    last_name: str = Field(min_length=1, max_length=100)
+
+
+class RegisterResponse(BaseModel):
+    message: str
+    email: EmailStr
+    requires_verification: bool = True
+
+
+class VerifyEmailRequest(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=4, max_length=10)
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+class LoginRequest(BaseModel):
+    # Accepts username OR email in the same field.
+    username: str
+    password: str
+
+
+class GoogleAuthRequest(BaseModel):
+    # Google ID token (JWT credential) returned by Google Identity Services.
+    id_token: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+# --- Admin user-management requests ----------------------------------------
+class AdminCreateUserRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=100)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    first_name: str = Field(min_length=1, max_length=100)
+    last_name: str = Field(min_length=1, max_length=100)
+    role: str = "teacher"  # admin provisions teacher (or student) accounts
+
+
+class AdminUpdateUserRequest(BaseModel):
+    email: Optional[EmailStr] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    is_active: Optional[bool] = None
+    role: Optional[str] = None  # 'student' | 'teacher' | 'admin'
+
+    @validator("role")
+    def role_must_be_valid(cls, v):
+        if v is None:
+            return v
+        allowed = {"student", "teacher", "admin"}
+        if v not in allowed:
+            raise ValueError(f"role must be one of {sorted(allowed)}")
+        return v
+
+
+class UpdateProfileRequest(BaseModel):
+    """Fields a user may edit freely on their own profile.
+
+    Email is intentionally excluded — changing it requires the verified
+    email-change flow (request a code, then confirm it).
+    """
+    first_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    last_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    bio: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ChangeEmailRequest(BaseModel):
+    new_email: EmailStr
+
+
+class ConfirmEmailChangeRequest(BaseModel):
+    code: str = Field(min_length=4, max_length=10)
+
+
+# --- Legacy (kept until services/moodle.py is removed in Phase 2) -----------
 class MoodleToken(BaseModel):
     token: str
     error: Optional[str] = None
-
-
-class MoodleLoginResponse(BaseModel):
-    success: bool
-    token: Optional[str] = None
-    user: Optional[UserResponse] = None
-    error: Optional[str] = None
-
-
-class MoodleConfigBase(BaseModel):
-    base_url: str
-    service_name: str = "modquest"
-
-
-class MoodleConfigCreate(MoodleConfigBase):
-    pass
-
-
-class MoodleConfigResponse(MoodleConfigBase):
-    id: int
-    created_at: datetime
-    updated_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True 

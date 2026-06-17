@@ -16,10 +16,44 @@ import type {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL;
 
+// Origin of the backend without the trailing "/api" — used to resolve static
+// file URLs like "/static/uploads/...". e.g. http://localhost:8002/api -> http://localhost:8002
+export const API_ORIGIN = (API_BASE_URL || "").replace(/\/api\/?$/, "");
+
+/** Turn a relative "/static/..." path into an absolute URL on the backend. */
+export function resolveStaticUrl(url: string): string {
+  if (!url) return url;
+  if (/^https?:\/\//i.test(url)) return url; // already absolute (e.g. a link attachment)
+  return `${API_ORIGIN}${url.startsWith("/") ? "" : "/"}${url}`;
+}
+
 export interface ApiErrorResponse {
   success: false;
   error: string;
   status?: number;
+}
+
+/** Error thrown by request() for non-OK responses. `message` is the clean
+ * FastAPI `detail`; `status` carries the HTTP status for branching. */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+/** True if the error is an ApiError with the given HTTP status. */
+export function isApiError(error: unknown, status?: number): error is ApiError {
+  return error instanceof ApiError && (status === undefined || error.status === status);
+}
+
+/** Clean user-facing message from any thrown error (ApiError already clean). */
+export function cleanError(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) return error.message || fallback;
+  if (error instanceof Error) return error.message || fallback;
+  return fallback;
 }
 
 export interface ApiSuccessResponse<T> {
@@ -40,6 +74,7 @@ export interface MoodleLoginResult {
   user?: any;
   token?: string;
   access_token?: string;
+  refresh_token?: string;
   privateToken?: string;
   error?: string;
 }
@@ -54,6 +89,12 @@ export interface JwtToken {
     username: string;
     email?: string;
     role: string;
+    first_name?: string;
+    last_name?: string;
+    profile_image_url?: string;
+    auth_provider?: string;
+    is_active?: boolean;
+    created_at?: string;
   };
 }
 
@@ -147,26 +188,78 @@ export interface StudentProgress {
   last_activity: string | null;
 }
 
+// Aggregated payload from GET /dashboard/summary. Loose types on the list/object
+// slots avoid importing service modules (which import this file).
+export interface DashboardSummary {
+  quizzes: any[];
+  classes: any[];
+  progress: StudentProgress | null;
+  pet: any | null;
+  streak: { streak?: { current_streak?: number } } | null;
+}
+
 class ApiClient {
   private token: string = "";
+  private refreshTokenValue: string = "";
   private connectionPoolTimers: Map<string, NodeJS.Timeout> = new Map();
   private maxRetries: number = 2;
+  private onTokensRefreshed: ((access: string, refresh: string) => void) | null = null;
+  private refreshing: Promise<boolean> | null = null;
 
   setToken(token: string) {
     this.token = token;
+  }
+
+  setTokens(access: string, refresh: string) {
+    this.token = access;
+    this.refreshTokenValue = refresh || "";
+  }
+
+  setOnTokensRefreshed(cb: (access: string, refresh: string) => void) {
+    this.onTokensRefreshed = cb;
   }
 
   getToken() {
     return this.token;
   }
 
+  // Exchange the refresh token for a fresh access token (deduped across
+  // concurrent 401s). Returns true on success.
+  private tryRefresh(): Promise<boolean> {
+    if (!this.refreshTokenValue) return Promise.resolve(false);
+    if (!this.refreshing) {
+      this.refreshing = (async () => {
+        try {
+          const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh_token: this.refreshTokenValue }),
+            credentials: "omit",
+          });
+          if (!res.ok) return false;
+          const data = await res.json();
+          this.token = data.access_token;
+          this.refreshTokenValue = data.refresh_token || this.refreshTokenValue;
+          this.onTokensRefreshed?.(this.token, this.refreshTokenValue);
+          return true;
+        } catch {
+          return false;
+        }
+      })().finally(() => {
+        this.refreshing = null;
+      });
+    }
+    return this.refreshing;
+  }
+
   // Helper for making API requests with automatic retries and connection pooling
   public async request<T>(
     endpoint: string,
-    method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" = "GET",
     body?: any,
     retries: number = this.maxRetries,
-    timeout: number = 8000
+    timeout: number = 8000,
+    refreshRetried: boolean = false
   ): Promise<T> {
     const url = `${API_BASE_URL}${endpoint}`;
 
@@ -193,7 +286,10 @@ class ApiClient {
         },
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
-        credentials: "include", // This ensures cookies are sent with the request
+        // Auth uses Bearer tokens (Authorization header), not cookies, so we
+        // don't need credentialed requests — this avoids the credentialed-CORS
+        // wildcard restriction.
+        credentials: "omit",
       });
 
       // Connection completed, remove from pool
@@ -202,6 +298,20 @@ class ApiClient {
 
       // Handle HTTP error responses
       if (!response.ok) {
+        // Expired access token → try a one-time refresh, then replay the request.
+        if (
+          response.status === 401 &&
+          !refreshRetried &&
+          !endpoint.startsWith("/auth/")
+        ) {
+          clearTimeout(timeoutId);
+          this.connectionPoolTimers.delete(poolKey);
+          const refreshed = await this.tryRefresh();
+          if (refreshed) {
+            return this.request<T>(endpoint, method, body, retries, timeout, true);
+          }
+        }
+
         const errorText = await response.text();
 
         // For database connection errors, retry
@@ -217,12 +327,25 @@ class ApiClient {
           );
           // Wait before retrying
           await new Promise((resolve) => setTimeout(resolve, 1000));
-          return this.request<T>(endpoint, method, body, retries - 1);
+          return this.request<T>(endpoint, method, body, retries - 1, timeout, refreshRetried);
         }
 
-        throw new Error(
-          `API Error ${response.status}: ${errorText || response.statusText}`
-        );
+        // Surface the FastAPI `detail` as a clean message; keep the status code.
+        let detail = errorText || response.statusText;
+        try {
+          const parsed = JSON.parse(errorText);
+          if (parsed?.detail) {
+            detail =
+              typeof parsed.detail === "string"
+                ? parsed.detail
+                : Array.isArray(parsed.detail)
+                ? parsed.detail.map((d: { msg?: string }) => d?.msg || String(d)).join(", ")
+                : detail;
+          }
+        } catch {
+          /* not JSON */
+        }
+        throw new ApiError(response.status, detail);
       }
 
       // Handle 204 No Content responses (like DELETE operations)
@@ -250,7 +373,7 @@ class ApiClient {
           );
           // Wait before retrying
           await new Promise((resolve) => setTimeout(resolve, 1000));
-          return this.request<T>(endpoint, method, body, retries - 1);
+          return this.request<T>(endpoint, method, body, retries - 1, timeout, refreshRetried);
         }
         throw new Error("Request timeout");
       }
@@ -259,24 +382,161 @@ class ApiClient {
     }
   }
 
-  // Moodle login
+  // Multipart file upload. Cannot reuse request() because that forces a JSON
+  // Content-Type; here the browser must set the multipart boundary itself.
+  async uploadFile<T>(endpoint: string, file: File): Promise<T> {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      method: "POST",
+      headers: {
+        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+      },
+      body: form,
+      credentials: "omit",
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Upload failed ${response.status}: ${errorText}`);
+    }
+    return (await response.json()) as T;
+  }
+
+  // Native email/username + password login
   async login(username: string, password: string): Promise<MoodleLoginResult> {
     try {
-      return await this.request<MoodleLoginResult>(
-        "/auth/moodle/login",
-        "POST",
-        {
-          username,
-          password,
-        }
-      );
+      const token = await this.request<JwtToken>("/auth/login", "POST", {
+        username,
+        password,
+      });
+      this.setToken(token.access_token);
+      return {
+        success: true,
+        token: token.access_token,
+        access_token: token.access_token,
+        refresh_token: token.refresh_token,
+        user: token.user,
+      };
     } catch (error) {
       console.error("Login error:", error);
       return {
         success: false,
-        error: error instanceof Error ? error.message : "Login failed",
+        error: cleanError(error, "Login failed"),
       };
     }
+  }
+
+  // Native self-registration (always creates a student). Returns a
+  // verification-pending result — the user must confirm an emailed code.
+  async register(data: {
+    username: string;
+    email: string;
+    password: string;
+    first_name: string;
+    last_name: string;
+  }): Promise<{ success: boolean; email?: string; message?: string; error?: string }> {
+    try {
+      const res = await this.request<{ message: string; email: string }>(
+        "/auth/register",
+        "POST",
+        data
+      );
+      return { success: true, email: res.email, message: res.message };
+    } catch (error) {
+      console.error("Register error:", error);
+      return {
+        success: false,
+        error: cleanError(error, "Registration failed"),
+      };
+    }
+  }
+
+  // Confirm the emailed verification code; on success the user is logged in.
+  async verifyEmail(email: string, code: string): Promise<MoodleLoginResult> {
+    try {
+      const token = await this.request<JwtToken>("/auth/verify-email", "POST", {
+        email,
+        code,
+      });
+      this.setToken(token.access_token);
+      return {
+        success: true,
+        token: token.access_token,
+        access_token: token.access_token,
+        refresh_token: token.refresh_token,
+        user: token.user,
+      };
+    } catch (error) {
+      console.error("Verify email error:", error);
+      return {
+        success: false,
+        error: cleanError(error, "Verification failed"),
+      };
+    }
+  }
+
+  async resendVerification(email: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>("/auth/resend-verification", "POST", {
+      email,
+    });
+  }
+
+  // Google Sign-In: exchange a Google ID token for our session token
+  async googleLogin(idToken: string): Promise<MoodleLoginResult> {
+    try {
+      const token = await this.request<JwtToken>("/auth/google", "POST", {
+        id_token: idToken,
+      });
+      this.setToken(token.access_token);
+      return {
+        success: true,
+        token: token.access_token,
+        access_token: token.access_token,
+        refresh_token: token.refresh_token,
+        user: token.user,
+      };
+    } catch (error) {
+      console.error("Google login error:", error);
+      return {
+        success: false,
+        error: cleanError(error, "Google sign-in failed"),
+      };
+    }
+  }
+
+  async refreshSession(refreshToken: string): Promise<JwtToken | null> {
+    try {
+      const token = await this.request<JwtToken>("/auth/refresh", "POST", {
+        refresh_token: refreshToken,
+      });
+      this.setToken(token.access_token);
+      return token;
+    } catch (error) {
+      console.error("Refresh error:", error);
+      return null;
+    }
+  }
+
+  async getMe(): Promise<JwtToken["user"] | null> {
+    try {
+      return await this.request<JwtToken["user"]>("/auth/me", "GET");
+    } catch (error) {
+      console.error("getMe error:", error);
+      return null;
+    }
+  }
+
+  async forgotPassword(email: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>("/auth/forgot-password", "POST", {
+      email,
+    });
+  }
+
+  async resetPassword(token: string, newPassword: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>("/auth/reset-password", "POST", {
+      token,
+      new_password: newPassword,
+    });
   }
 
   // Logout
@@ -290,20 +550,8 @@ class ApiClient {
       this.token = "";
     }
   }
-  // Store user data with retry and resilience
-  async storeUser(userData: any): Promise<any> {
-    try {
-      return await this.request<any>(
-        "/auth/moodle/store-user",
-        "POST",
-        userData
-      );
-    } catch (error) {
-      console.warn("User storage error (non-critical):", error);
-      // Return a mock success response as this should be non-blocking
-      return { success: true, message: "User data will sync later" };
-    }
-  } // Fetch student progress data
+
+  // Fetch student progress data
   async fetchStudentProgress(userId: number): Promise<StudentProgress> {
     try {
       return await this.request<StudentProgress>(
@@ -314,6 +562,19 @@ class ApiClient {
       console.error("Student progress fetch error:", error);
       throw error;
     }
+  }
+
+  // One request that returns everything the student dashboard needs, so the
+  // page doesn't fan out into ~10 separate round-trips. Callers should fall
+  // back to the individual endpoints if this throws.
+  async getDashboardSummary(): Promise<DashboardSummary> {
+    return this.request<DashboardSummary>(
+      "/dashboard/summary",
+      "GET",
+      undefined,
+      1,
+      12000
+    );
   }
 
   // Daily Quest Methods
@@ -457,13 +718,12 @@ class ApiClient {
   // Badge Methods
   async getAllBadges(activeOnly: boolean = true): Promise<Badge[]> {
     try {
-      // Use longer timeout for badges endpoint as it might be slower
       return await this.request<Badge[]>(
         `/badges?active_only=${activeOnly}`,
         "GET",
         undefined,
-        3, // More retries for badges
-        15000 // Longer timeout (15 seconds)
+        1, // one retry is plenty; avoids a slow call hanging the badge panel
+        8000
       );
     } catch (error) {
       console.error("Get all badges error:", error);
@@ -496,6 +756,89 @@ class ApiClient {
       console.error("Seed badges error:", error);
       throw error;
     }
+  }
+
+  // --- Teacher custom badges ---
+  async createCustomBadge(data: {
+    name: string;
+    description?: string;
+    icon: string;
+    color: string;
+    shape: "circle" | "shield" | "banner";
+    exp_value: number;
+  }): Promise<{ success: boolean; badge: Badge }> {
+    return this.request("/badges/custom", "POST", data);
+  }
+
+  async getMyCustomBadges(): Promise<{ success: boolean; badges: Badge[] }> {
+    return this.request("/badges/custom/mine", "GET");
+  }
+
+  async updateCustomBadge(
+    badgeId: number,
+    data: Partial<{
+      name: string;
+      description: string;
+      icon: string;
+      color: string;
+      shape: "circle" | "shield" | "banner";
+      exp_value: number;
+      is_active: boolean;
+    }>
+  ): Promise<{ success: boolean; badge: Badge }> {
+    return this.request(`/badges/custom/${badgeId}`, "PUT", data);
+  }
+
+  async deleteCustomBadge(badgeId: number): Promise<{ success: boolean }> {
+    return this.request(`/badges/custom/${badgeId}`, "DELETE");
+  }
+
+  async awardCustomBadge(
+    badgeId: number,
+    userId: number,
+    courseId?: number
+  ): Promise<{ success: boolean; message: string; exp_bonus: number }> {
+    return this.request(`/badges/custom/${badgeId}/award`, "POST", {
+      user_id: userId,
+      course_id: courseId ?? null,
+    });
+  }
+
+  async revokeCustomBadge(
+    badgeId: number,
+    userId: number
+  ): Promise<{ success: boolean }> {
+    return this.request(`/badges/custom/${badgeId}/award/${userId}`, "DELETE");
+  }
+
+  async getBadgeRecipients(
+    badgeId: number
+  ): Promise<{
+    success: boolean;
+    recipients: { user_id: number; name: string; awarded_at: string | null }[];
+  }> {
+    return this.request(`/badges/custom/${badgeId}/recipients`, "GET");
+  }
+
+  // Badges the student earned but hasn't seen the popup for yet (offline replay).
+  async getUnseenBadges(): Promise<{
+    success: boolean;
+    badges: {
+      badge_id: number;
+      name: string;
+      description: string;
+      icon: string;
+      color: string;
+      shape: "circle" | "shield" | "banner";
+      exp_value: number;
+      is_custom: boolean;
+    }[];
+  }> {
+    return this.request("/badges/unseen", "GET");
+  }
+
+  async ackBadges(badgeIds: number[]): Promise<{ success: boolean }> {
+    return this.request("/badges/unseen/ack", "POST", { badge_ids: badgeIds });
   }
 
   async updateBadge(badgeId: number, badgeData: BadgeUpdate): Promise<Badge> {

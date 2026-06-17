@@ -1,4 +1,4 @@
-// Leveling system utility functions for MoodleQuest
+// Leveling system utility functions for LearningQuest
 
 export interface LevelInfo {
   level: number;

@@ -8,6 +8,7 @@ class QuestTypeResponse(str, Enum):
     DAILY_LOGIN = "daily_login"
     FEED_PET = "feed_pet"
     EARN_XP = "earn_xp"
+    COMPLETE_QUIZ = "complete_quiz"
 
 class QuestStatusResponse(str, Enum):
     AVAILABLE = "available"

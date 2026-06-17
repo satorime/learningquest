@@ -1,8 +1,8 @@
-# How Badge Achievement Detection Works in MoodleQuest
+# How Badge Achievement Detection Works in LearningQuest
 
 ## Overview
 
-Your MoodleQuest badge system uses an **event-driven architecture** where badges are automatically checked and awarded when users perform certain actions. The system doesn't continuously monitor for achievements - instead, it triggers badge checks at specific moments when a user's progress changes.
+Your LearningQuest badge system uses an **event-driven architecture** where badges are automatically checked and awarded when users perform certain actions. The system doesn't continuously monitor for achievements - instead, it triggers badge checks at specific moments when a user's progress changes.
 
 ## When Badge Detection Happens
 

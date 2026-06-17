@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
 from app.models.user import User
-from app.utils.auth import get_current_user_from_moodle_token
+from app.utils.auth import get_current_active_user
 from app.services.progress_service import ProgressService
 from app.schemas.progress import (
     ProgressOverviewResponse, DetailedProgressResponse
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/progress", tags=["progress"])
 
 @router.get("/overview", response_model=ProgressOverviewResponse)
 async def get_progress_overview(
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -60,7 +60,7 @@ async def get_progress_overview(
 
 @router.get("/detailed", response_model=DetailedProgressResponse)
 async def get_detailed_progress(
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -136,7 +136,7 @@ async def get_detailed_progress(
 @router.get("/overview/{user_id}", response_model=ProgressOverviewResponse)
 async def get_progress_overview_by_id(
     user_id: int,
-    current_user: User = Depends(get_current_user_from_moodle_token),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -145,21 +145,23 @@ async def get_progress_overview_by_id(
     try:
         logger.info(f"User {current_user.username} requesting progress overview for user {user_id}")
         
-        # Check if target user exists by Moodle user ID
-        target_user = db.query(User).filter(User.moodle_user_id == user_id).first()
+        # Resolve target by internal id first, then legacy moodle id.
+        target_user = db.query(User).filter(User.id == user_id).first()
+        if not target_user:
+            target_user = db.query(User).filter(User.moodle_user_id == user_id).first()
         if not target_user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
             )
-        
-        # TODO: Add authorization check for teachers/professors
-        # if current_user.role not in ["teacher", "professor"]:
-        #     raise HTTPException(
-        #         status_code=status.HTTP_403_FORBIDDEN,
-        #         detail="Access denied"
-        #     )
-        
+
+        # Only the user themselves or staff may view a progress overview.
+        if current_user.id != target_user.id and current_user.role not in ("teacher", "admin"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to view this user's progress"
+            )
+
         progress_service = ProgressService(db)
         
         # Use the target user's local database ID for progress service calls

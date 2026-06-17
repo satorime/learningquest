@@ -12,6 +12,21 @@ from app.services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
+
+def add_food(db: Session, user_id: int, amount: int) -> int:
+    """Add (or remove, if negative) food on a user's pet. Returns the new total.
+
+    No-op if the user has no pet yet. Caller is responsible for committing,
+    though this commits to be safe when called from reward flows.
+    """
+    pet = db.query(VirtualPet).filter(VirtualPet.user_id == user_id).first()
+    if not pet:
+        return 0
+    pet.food = max(0, (pet.food or 0) + amount)
+    db.commit()
+    return pet.food
+
+
 class PetService:
     def __init__(self, db: Session):
         self.db = db
@@ -45,12 +60,48 @@ class PetService:
         """Calculate XP required for a specific level using exponential curve."""
         if level <= 1:
             return 0
-        
+
         base = 100
         exponent = 1.5
         linear_factor = 50
-        
+
         return int(base * (level - 1) ** exponent + (level - 1) * linear_factor)
+
+    def get_level_progress(self, user_id: int) -> Dict[str, Any]:
+        """Return the user's level plus how far they are toward the next level.
+
+        ``exp_progress`` is a whole-number percentage (0-100) of the XP earned
+        within the current level — i.e. what the pet's level bar should fill to.
+        """
+        total_exp = self.db.query(func.sum(ExperiencePoints.amount)).filter(
+            ExperiencePoints.user_id == user_id
+        ).scalar() or 0
+        total_exp = max(0, int(total_exp))
+
+        # Walk up levels, tracking the XP floor required to have reached each one.
+        level = 1
+        xp_floor = 0
+        while True:
+            xp_for_next = self._get_xp_for_level(level + 1)
+            if xp_floor + xp_for_next > total_exp:
+                break
+            xp_floor += xp_for_next
+            level += 1
+
+        exp_for_next_level = self._get_xp_for_level(level + 1)
+        exp_into_level = total_exp - xp_floor
+        if exp_for_next_level > 0:
+            progress = int(round(exp_into_level / exp_for_next_level * 100))
+        else:
+            progress = 0
+
+        return {
+            "level": level,
+            "total_exp": total_exp,
+            "exp_into_level": exp_into_level,
+            "exp_for_next_level": exp_for_next_level,
+            "exp_progress": max(0, min(100, progress)),
+        }
 
     def synchronize_pet_level(self, user_id: int) -> Dict[str, Any]:
         """Synchronize pet level with user level and handle level-based unlocks."""

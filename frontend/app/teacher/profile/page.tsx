@@ -1,6 +1,7 @@
 "use client";
 
 import { useAuth } from "@/lib/auth-context";
+import { DriveConnectionCard } from "@/components/teacher/drive-connection-card";
 import {
   Card,
   CardContent,
@@ -177,6 +178,9 @@ export default function TeacherProfilePage() {
             </div>
           </CardHeader>
         </Card>
+
+        {/* Google Drive connection for submission storage */}
+        <DriveConnectionCard />
 
         <div className="grid gap-6 md:grid-cols-2">
           {/* Account Information */}

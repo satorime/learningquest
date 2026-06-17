@@ -14,7 +14,8 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useBadgeCollection } from "@/hooks/use-badge-collection";
-import { useCurrentUser } from "@/hooks/useCurrentMoodleUser";
+import { useCurrentUser } from "@/hooks/use-current-user";
+import { BadgeArt, badgeArtPropsFromCriteria } from "@/components/badges/badge-art";
 import {
   Trophy,
   Award,
@@ -53,199 +54,7 @@ export function BadgeCollection({
     loading,
     error,
     refetch,
-    seedBadges,
   } = useBadgeCollection(user?.id);
-
-  const getBadgeIcon = (badgeType: string, name: string) => {
-    const iconProps = { className: "h-4 w-4 md:h-5 md:w-5 text-white" };
-
-    // Icon selection based on badge name/keywords
-    if (
-      name.toLowerCase().includes("first") ||
-      name.toLowerCase().includes("beginner")
-    ) {
-      return <Flag {...iconProps} />;
-    }
-    if (
-      name.toLowerCase().includes("streak") ||
-      name.toLowerCase().includes("consecutive")
-    ) {
-      return <Flame {...iconProps} />;
-    }
-    if (
-      name.toLowerCase().includes("knowledge") ||
-      name.toLowerCase().includes("quest") ||
-      name.toLowerCase().includes("learn")
-    ) {
-      return <BookOpen {...iconProps} />;
-    }
-    if (
-      name.toLowerCase().includes("xp") ||
-      name.toLowerCase().includes("experience") ||
-      name.toLowerCase().includes("points")
-    ) {
-      return <Zap {...iconProps} />;
-    }
-    if (
-      name.toLowerCase().includes("social") ||
-      name.toLowerCase().includes("team") ||
-      name.toLowerCase().includes("friend")
-    ) {
-      return <Users {...iconProps} />;
-    }
-    if (
-      name.toLowerCase().includes("speed") ||
-      name.toLowerCase().includes("fast") ||
-      name.toLowerCase().includes("quick")
-    ) {
-      return <Clock {...iconProps} />;
-    }
-    if (
-      name.toLowerCase().includes("perfect") ||
-      name.toLowerCase().includes("100%") ||
-      name.toLowerCase().includes("master")
-    ) {
-      return <Target {...iconProps} />;
-    }
-    if (
-      name.toLowerCase().includes("help") ||
-      name.toLowerCase().includes("kind") ||
-      name.toLowerCase().includes("support")
-    ) {
-      return <Heart {...iconProps} />;
-    }
-    if (
-      name.toLowerCase().includes("legend") ||
-      name.toLowerCase().includes("champion") ||
-      name.toLowerCase().includes("ultimate")
-    ) {
-      return <Crown {...iconProps} />;
-    }
-
-    // Fallback based on badge type
-    switch (badgeType) {
-      case "achievement":
-        return <Star {...iconProps} />;
-      case "progression":
-        return <Trophy {...iconProps} />;
-      case "streak":
-        return <Flame {...iconProps} />;
-      case "special":
-        return <Gift {...iconProps} />;
-      default:
-        return <Medal {...iconProps} />;
-    }
-  };
-
-  const getBadgeGradient = (
-    badgeType: string,
-    name: string,
-    earned: boolean
-  ) => {
-    if (!earned) return "bg-muted/30 border-dashed border-muted";
-
-    // Color selection based on badge name/keywords
-    if (
-      name.toLowerCase().includes("first") ||
-      name.toLowerCase().includes("beginner")
-    ) {
-      return "bg-gradient-to-br from-amber-500/20 to-orange-500/20 border-amber-500/30";
-    }
-    if (
-      name.toLowerCase().includes("streak") ||
-      name.toLowerCase().includes("consecutive")
-    ) {
-      return "bg-gradient-to-br from-red-500/20 to-orange-500/20 border-red-500/30";
-    }
-    if (
-      name.toLowerCase().includes("knowledge") ||
-      name.toLowerCase().includes("quest") ||
-      name.toLowerCase().includes("learn")
-    ) {
-      return "bg-gradient-to-br from-blue-500/20 to-purple-500/20 border-blue-500/30";
-    }
-    if (
-      name.toLowerCase().includes("xp") ||
-      name.toLowerCase().includes("experience") ||
-      name.toLowerCase().includes("points")
-    ) {
-      return "bg-gradient-to-br from-purple-500/20 to-pink-500/20 border-purple-500/30";
-    }
-    if (
-      name.toLowerCase().includes("social") ||
-      name.toLowerCase().includes("team") ||
-      name.toLowerCase().includes("friend")
-    ) {
-      return "bg-gradient-to-br from-green-500/20 to-emerald-500/20 border-green-500/30";
-    }
-
-    // Fallback based on badge type
-    switch (badgeType) {
-      case "achievement":
-        return "bg-gradient-to-br from-amber-500/20 to-orange-500/20 border-amber-500/30";
-      case "progression":
-        return "bg-gradient-to-br from-purple-500/20 to-pink-500/20 border-purple-500/30";
-      case "streak":
-        return "bg-gradient-to-br from-red-500/20 to-orange-500/20 border-red-500/30";
-      case "special":
-        return "bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border-cyan-500/30";
-      default:
-        return "bg-gradient-to-br from-green-500/20 to-emerald-500/20 border-green-500/30";
-    }
-  };
-
-  const getBadgeIconBg = (badgeType: string, name: string, earned: boolean) => {
-    if (!earned) return "bg-muted";
-
-    // Color selection based on badge name/keywords
-    if (
-      name.toLowerCase().includes("first") ||
-      name.toLowerCase().includes("beginner")
-    ) {
-      return "bg-amber-500";
-    }
-    if (
-      name.toLowerCase().includes("streak") ||
-      name.toLowerCase().includes("consecutive")
-    ) {
-      return "bg-red-500";
-    }
-    if (
-      name.toLowerCase().includes("knowledge") ||
-      name.toLowerCase().includes("quest") ||
-      name.toLowerCase().includes("learn")
-    ) {
-      return "bg-blue-500";
-    }
-    if (
-      name.toLowerCase().includes("xp") ||
-      name.toLowerCase().includes("experience") ||
-      name.toLowerCase().includes("points")
-    ) {
-      return "bg-purple-500";
-    }
-    if (
-      name.toLowerCase().includes("social") ||
-      name.toLowerCase().includes("team") ||
-      name.toLowerCase().includes("friend")
-    ) {
-      return "bg-green-500";
-    }
-
-    // Fallback based on badge type
-    switch (badgeType) {
-      case "achievement":
-        return "bg-amber-500";
-      case "progression":
-        return "bg-purple-500";
-      case "streak":
-        return "bg-red-500";
-      case "special":
-        return "bg-cyan-500";
-      default:
-        return "bg-green-500";
-    }
-  };
 
   if (loading) {
     return (
@@ -278,11 +87,6 @@ export function BadgeCollection({
               <Button onClick={refetch} variant="outline" size="sm">
                 Retry
               </Button>
-              {error.includes("timeout") && (
-                <Button onClick={seedBadges} variant="default" size="sm">
-                  Seed Badges
-                </Button>
-              )}
             </div>
           </div>
         </AlertDescription>
@@ -300,16 +104,14 @@ export function BadgeCollection({
         <CardContent className={compact ? "p-0" : "pt-6"}>
           <div className="text-center py-8">
             <Medal className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-            <h3 className="text-lg font-semibold mb-2">No Badges Available</h3>
+            <h3 className="text-lg font-semibold mb-2">No Badges Yet</h3>
             <p className="text-muted-foreground mb-4">
-              Badges are being set up or temporarily unavailable.
+              Keep learning — badges unlock as you complete quests, build streaks,
+              and grow your pet.
             </p>
             <div className="space-x-2">
               <Button onClick={refetch} variant="outline" size="sm">
-                Refresh Badges
-              </Button>
-              <Button onClick={seedBadges} variant="default" size="sm">
-                Seed Badges
+                Refresh
               </Button>
             </div>
           </div>
@@ -331,50 +133,16 @@ export function BadgeCollection({
           {badgeProgress.slice(0, 8).map((badgeItem) => (
             <motion.div
               key={badgeItem.badge.badge_id}
-              className={`
-                relative p-2 rounded-lg border transition-all duration-200
-                ${
-                  badgeItem.earned
-                    ? getBadgeGradient(
-                        badgeItem.badge.badge_type,
-                        badgeItem.badge.name,
-                        badgeItem.earned
-                      ) + " shadow-sm"
-                    : "bg-muted/30 border-dashed border-muted opacity-60"
-                }
-              `}
-              whileHover={{ scale: 1.05 }}
+              className="relative flex justify-center"
+              whileHover={{ scale: 1.08 }}
               whileTap={{ scale: 0.95 }}
+              title={badgeItem.badge.name}
             >
-              <motion.div
-                animate={
-                  badgeItem.earned
-                    ? {
-                        scale: [1, 1.1, 1],
-                      }
-                    : {}
-                }
-                transition={{ duration: 2, repeat: Infinity }}
-                className={`
-                flex items-center justify-center h-8 w-8 rounded-full mx-auto
-                ${
-                  badgeItem.earned
-                    ? getBadgeIconBg(
-                        badgeItem.badge.badge_type,
-                        badgeItem.badge.name,
-                        badgeItem.earned
-                      )
-                    : "bg-muted"
-                }
-              `}
-              >
-                {badgeItem.earned ? (
-                  getBadgeIcon(badgeItem.badge.badge_type, badgeItem.badge.name)
-                ) : (
-                  <Lock className="h-3 w-3 text-muted-foreground" />
-                )}
-              </motion.div>
-
+              <BadgeArt
+                {...badgeArtPropsFromCriteria(badgeItem.badge.criteria)}
+                earned={badgeItem.earned}
+                size={48}
+              />
               {badgeItem.earned && (
                 <div className="absolute -top-1 -right-1">
                   <CheckCircle2 className="h-4 w-4 text-green-500 bg-white rounded-full" />
@@ -420,11 +188,6 @@ export function BadgeCollection({
             </CardDescription>
           </div>
 
-          {badgeProgress.length === 0 && (
-            <Button onClick={seedBadges} variant="outline" size="sm">
-              Create Badges
-            </Button>
-          )}
         </div>
 
         {/* Progress Summary */}
@@ -487,43 +250,18 @@ export function BadgeCollection({
                   <motion.div
                     key={badgeItem.badge.badge_id}
                     whileHover={{ scale: 1.05, y: -2 }}
-                    className={`
-                      ${getBadgeGradient(
-                        badgeItem.badge.badge_type,
-                        badgeItem.badge.name,
-                        badgeItem.earned
-                      )}
-                      rounded-lg p-3 border relative overflow-hidden
-                    `}
+                    className="rounded-lg p-3 border bg-card relative overflow-hidden flex flex-col items-center"
                   >
-                    {/* Animated icon */}
                     <motion.div
-                      animate={{
-                        scale: [1, 1.1, 1],
-                        rotate: badgeItem.badge.name
-                          .toLowerCase()
-                          .includes("streak")
-                          ? [0, 5, -5, 0]
-                          : badgeItem.badge.name
-                              .toLowerCase()
-                              .includes("knowledge")
-                          ? [0, 10, -10, 0]
-                          : undefined,
-                      }}
-                      transition={{
-                        duration: 3,
-                        repeat: Infinity,
-                      }}
-                      className={`w-8 h-8 md:w-10 md:h-10 mx-auto mb-2 rounded-full flex items-center justify-center ${getBadgeIconBg(
-                        badgeItem.badge.badge_type,
-                        badgeItem.badge.name,
-                        badgeItem.earned
-                      )}`}
+                      animate={{ scale: [1, 1.06, 1] }}
+                      transition={{ duration: 3, repeat: Infinity }}
+                      className="mb-2"
                     >
-                      {getBadgeIcon(
-                        badgeItem.badge.badge_type,
-                        badgeItem.badge.name
-                      )}
+                      <BadgeArt
+                        {...badgeArtPropsFromCriteria(badgeItem.badge.criteria)}
+                        earned
+                        size={64}
+                      />
                     </motion.div>
 
                     {/* Badge info */}
@@ -582,11 +320,15 @@ export function BadgeCollection({
                   <motion.div
                     key={badgeItem.badge.badge_id}
                     whileHover={{ scale: 1.02 }}
-                    className="bg-muted/30 rounded-lg p-3 border border-dashed border-muted relative opacity-60"
+                    className="bg-muted/30 rounded-lg p-3 border border-dashed border-muted relative flex flex-col items-center"
                   >
-                    {/* Static icon */}
-                    <div className="w-8 h-8 md:w-10 md:h-10 mx-auto mb-2 rounded-full bg-muted flex items-center justify-center">
-                      <Lock className="h-4 w-4 md:h-5 md:w-5 text-muted-foreground" />
+                    {/* Locked medallion (desaturated) */}
+                    <div className="mb-2">
+                      <BadgeArt
+                        {...badgeArtPropsFromCriteria(badgeItem.badge.criteria)}
+                        earned={false}
+                        size={64}
+                      />
                     </div>
                     {/* Badge info */}
                     <h4 className="font-medium text-xs md:text-sm text-center">

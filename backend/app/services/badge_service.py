@@ -3,7 +3,7 @@ from sqlalchemy import and_, func
 from typing import List, Optional, Dict, Any
 from ..models.badge import Badge, UserBadge
 from ..models.user import User
-from ..models.quest import QuestProgress, StudentProgress
+from ..models.quest import QuestProgress, StudentProgress, ExperiencePoints
 from ..models.streak import UserStreak
 from ..models.daily_quest import UserDailyQuest
 from datetime import datetime, date
@@ -33,22 +33,32 @@ class BadgeService:
         # Get all badges
         all_badges = self.db.query(Badge).filter(Badge.is_active == True).all()
         
-        # Convert moodle_user_id to local user_id
-        user = self.db.query(User).filter(User.moodle_user_id == user_id).first()
+        # Resolve the user by internal id first (what the frontend sends), then
+        # fall back to the legacy moodle id. Native accounts have no
+        # moodle_user_id, so resolving only by that returned no badges at all.
+        user = self.db.query(User).filter(User.id == user_id).first()
+        if not user:
+            user = self.db.query(User).filter(User.moodle_user_id == user_id).first()
         if not user:
             # If user not found, return empty result
             return []
-        
+
         local_user_id = user.id  # Extract the local user ID
-        
+
         # Get user's earned badges using the local user ID
         earned_badges = self.db.query(UserBadge).filter(UserBadge.user_id == local_user_id).all()
         earned_badge_map = {ub.badge_id: ub for ub in earned_badges}
-        
+
+        # Precompute the handful of metrics every badge's progress is derived
+        # from — once — instead of running per-badge queries in the loop below
+        # (that was an N+1: ~1-2 queries x every badge, each a round-trip to the
+        # remote DB).
+        metrics = self._compute_user_metrics(local_user_id)
+
         result = []
         for badge in all_badges:
             user_badge = earned_badge_map.get(badge.badge_id)
-            progress_data = self._calculate_progress(local_user_id, badge)  # Use local_user_id for progress calculation
+            progress_data = self._progress_from_metrics(badge, metrics)
             
             badge_dict = {
                 "badge_id": badge.badge_id,
@@ -76,6 +86,74 @@ class BadgeService:
             })
         
         return result
+
+    def _compute_user_metrics(self, user_id: int) -> Dict[str, Any]:
+        """Gather, in a fixed number of queries, every value badge progress is
+        derived from. Shared by all badges so progress no longer does per-badge
+        queries."""
+        from ..models.virtual_pet import VirtualPet
+
+        quests_completed = self.db.query(QuestProgress).filter(
+            and_(
+                QuestProgress.user_id == user_id,
+                QuestProgress.status == "completed",
+            )
+        ).count()
+
+        streaks = {
+            s.streak_type: s.current_streak
+            for s in self.db.query(UserStreak).filter(
+                UserStreak.user_id == user_id
+            ).all()
+        }
+
+        student_progress = self.db.query(StudentProgress).filter(
+            StudentProgress.user_id == user_id
+        ).first()
+        total_exp = student_progress.total_exp if student_progress else 0
+
+        pet = self.db.query(VirtualPet).filter(
+            VirtualPet.user_id == user_id
+        ).first()
+        pet_level = (pet.level or 1) if pet else 0
+
+        daily_completions = self.db.query(UserDailyQuest).filter(
+            and_(
+                UserDailyQuest.user_id == user_id,
+                UserDailyQuest.status == "completed",
+            )
+        ).count()
+
+        return {
+            "quests_completed": quests_completed,
+            "streaks": streaks,
+            "total_exp": total_exp,
+            "pet_level": pet_level,
+            "daily_completions": daily_completions,
+        }
+
+    def _progress_from_metrics(self, badge: Badge, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute a badge's progress from precomputed metrics. Mirrors the
+        per-type logic of _calculate_progress exactly, but without queries."""
+        criteria = badge.criteria or {}
+        criteria_type = criteria.get("type", "")
+        target = criteria.get("target", 1)
+
+        if criteria_type == "quest_completion":
+            current = metrics["quests_completed"]
+        elif criteria_type == "streak_days":
+            current = metrics["streaks"].get(criteria.get("streak_type", "login"), 0)
+        elif criteria_type in ("xp_earned", "total_exp"):
+            current = metrics["total_exp"]
+        elif criteria_type in ("pet_level", "level_reached"):
+            current = metrics["pet_level"]
+        elif criteria_type == "daily_quest_streak":
+            current = metrics["daily_completions"]
+        else:
+            current = 0
+
+        percentage = min(100.0, (current / target) * 100) if target > 0 else 0.0
+        return {"current": current, "target": target, "percentage": percentage}
 
     def award_badge(self, user_id: int, badge_id: int, awarded_by: Optional[int] = None, course_id: Optional[int] = None) -> Optional[UserBadge]:
         """Award a badge to a user"""
@@ -121,6 +199,8 @@ class BadgeService:
                         "exp_bonus": badge.exp_value,
                         "user_badge": awarded_badge
                     })
+                    self.grant_badge_xp(user_id, badge, awarded_by)
+                    self._notify_awarded(user_id, badge, awarded_by)
         
         return awarded_badges
 
@@ -151,6 +231,8 @@ class BadgeService:
         try:
             self.db.commit()
             self.db.refresh(user_badge)
+            self.grant_badge_xp(user_id, badge, awarded_by)
+            self._notify_awarded(user_id, badge, awarded_by)
             return {
                 "badge": badge,
                 "user_badge": user_badge,
@@ -159,6 +241,77 @@ class BadgeService:
         except Exception as e:
             self.db.rollback()
             raise e
+
+    def _notify_awarded(self, user_id: int, badge: Badge, awarded_by: Optional[int]) -> None:
+        """Push a live 'badge earned' SSE popup (best-effort; never blocks award)."""
+        try:
+            from app.services.realtime import notify_badge_awarded
+            notify_badge_awarded(user_id, badge, awarded_by)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def grant_badge_xp(self, user_id: int, badge: Badge, awarded_by: Optional[int] = None) -> None:
+        """Credit the badge's exp_value to the student's (global) XP. Self-contained
+        commit so a failure can't poison the surrounding transaction."""
+        amount = badge.exp_value or 0
+        if amount <= 0:
+            return
+        try:
+            prog = self.db.query(StudentProgress).filter(
+                StudentProgress.user_id == user_id,
+                StudentProgress.course_id.is_(None),
+            ).first()
+            if prog:
+                prog.total_exp = (prog.total_exp or 0) + amount
+                prog.last_activity = datetime.utcnow()
+            else:
+                self.db.add(StudentProgress(
+                    user_id=user_id, course_id=None, total_exp=amount,
+                    last_activity=datetime.utcnow(),
+                ))
+            self.db.add(ExperiencePoints(
+                user_id=user_id, course_id=0, amount=amount,
+                source_type="badge", source_id=badge.badge_id,
+                awarded_by=awarded_by, notes=f"Badge: {badge.name}",
+            ))
+            self.db.commit()
+        except Exception as e:  # noqa: BLE001
+            self.db.rollback()
+            print(f"Failed to grant badge XP (user {user_id}, badge {badge.badge_id}): {e}")
+
+    def revoke_badge_xp(self, user_id: int, badge: Badge) -> None:
+        """Reverse the XP a badge granted (used when a teacher revokes it).
+
+        Only reverses XP we actually granted for THIS badge (matched by the
+        'badge' ExperiencePoints record), and by the exact amount granted — so
+        badges awarded before XP-granting existed, or whose exp_value was edited
+        later, can't wrongly dock the student's other XP.
+        """
+        grant = self.db.query(ExperiencePoints).filter(
+            ExperiencePoints.user_id == user_id,
+            ExperiencePoints.source_type == "badge",
+            ExperiencePoints.source_id == badge.badge_id,
+        ).order_by(ExperiencePoints.exp_id.desc()).first()
+        if not grant or (grant.amount or 0) <= 0:
+            return
+        amount = grant.amount
+        try:
+            prog = self.db.query(StudentProgress).filter(
+                StudentProgress.user_id == user_id,
+                StudentProgress.course_id.is_(None),
+            ).first()
+            if prog:
+                prog.total_exp = max(0, (prog.total_exp or 0) - amount)
+                prog.last_activity = datetime.utcnow()
+            self.db.add(ExperiencePoints(
+                user_id=user_id, course_id=0, amount=-amount,
+                source_type="badge_revoked", source_id=badge.badge_id,
+                notes=f"Revoked badge: {badge.name}",
+            ))
+            self.db.commit()
+        except Exception as e:  # noqa: BLE001
+            self.db.rollback()
+            print(f"Failed to revoke badge XP (user {user_id}, badge {badge.badge_id}): {e}")
 
     def _check_badge_criteria(self, user_id: int, badge: Badge) -> bool:
         """Check if user meets the criteria for a specific badge"""
@@ -171,8 +324,10 @@ class BadgeService:
                 return self._check_quest_completion_criteria(user_id, target, criteria)
             elif criteria_type == "streak_days":
                 return self._check_streak_criteria(user_id, target, criteria)
-            elif criteria_type == "xp_earned":
+            elif criteria_type in ("xp_earned", "total_exp"):
                 return self._check_xp_criteria(user_id, target, criteria)
+            elif criteria_type in ("pet_level", "level_reached"):
+                return self._check_pet_level_criteria(user_id, target, criteria)
             elif criteria_type == "grade_average":
                 return self._check_grade_criteria(user_id, target, criteria)
             elif criteria_type == "assignment_submission":
@@ -181,6 +336,9 @@ class BadgeService:
                 return self._check_participation_criteria(user_id, target, criteria)
             elif criteria_type == "daily_quest_streak":
                 return self._check_daily_quest_streak_criteria(user_id, target, criteria)
+            elif criteria_type == "manual":
+                # Custom teacher badges are only ever hand-awarded.
+                return False
             else:
                 # Unknown criteria type
                 return False
@@ -221,8 +379,20 @@ class BadgeService:
         
         if not student_progress:
             return False
-        
+
         return student_progress.total_exp >= target
+
+    def _check_pet_level_criteria(self, user_id: int, target: int, criteria: Dict[str, Any]) -> bool:
+        """Check if the user's pet has reached the required level.
+
+        Pet level is kept in sync with the user's level, so this doubles as a
+        'level reached' check.
+        """
+        from ..models.virtual_pet import VirtualPet
+        pet = self.db.query(VirtualPet).filter(VirtualPet.user_id == user_id).first()
+        if not pet:
+            return False
+        return (pet.level or 1) >= target
 
     def _check_grade_criteria(self, user_id: int, target: int, criteria: Dict[str, Any]) -> bool:
         """Check if user maintains required grade average"""
@@ -283,11 +453,17 @@ class BadgeService:
                     )
                 ).first()
                 current_progress = user_streak.current_streak if user_streak else 0
-            elif criteria_type == "xp_earned":
+            elif criteria_type in ("xp_earned", "total_exp"):
                 student_progress = self.db.query(StudentProgress).filter(
                     StudentProgress.user_id == user_id
                 ).first()
                 current_progress = student_progress.total_exp if student_progress else 0
+            elif criteria_type in ("pet_level", "level_reached"):
+                from ..models.virtual_pet import VirtualPet
+                pet = self.db.query(VirtualPet).filter(
+                    VirtualPet.user_id == user_id
+                ).first()
+                current_progress = (pet.level or 1) if pet else 0
             elif criteria_type == "daily_quest_streak":
                 recent_completions = self.db.query(UserDailyQuest).filter(
                     and_(

@@ -11,6 +11,7 @@ class QuestTypeEnum(enum.Enum):
     DAILY_LOGIN = "daily_login"
     FEED_PET = "feed_pet"
     EARN_XP = "earn_xp"
+    COMPLETE_QUIZ = "complete_quiz"
 
 # Quest status enum
 class QuestStatusEnum(enum.Enum):
@@ -19,16 +20,18 @@ class QuestStatusEnum(enum.Enum):
     COMPLETED = "completed"
     EXPIRED = "expired"
 
-# Create ENUM types for PostgreSQL
+# Create ENUM types for PostgreSQL.
+# create_type=True so Base.metadata.create_all() emits CREATE TYPE on a fresh DB
+# (checkfirst makes it idempotent and avoids duplicate-type errors).
 quest_type_enum = ENUM(
-    'daily_login', 'feed_pet', 'earn_xp',
-    name='questtypeenum', 
-    create_type=False
+    'daily_login', 'feed_pet', 'earn_xp', 'complete_quiz',
+    name='questtypeenum',
+    create_type=True
 )
 quest_status_enum = ENUM(
     'available', 'active', 'completed', 'expired',
-    name='queststatusenum', 
-    create_type=False
+    name='queststatusenum',
+    create_type=True
 )
 
 class DailyQuest(Base):

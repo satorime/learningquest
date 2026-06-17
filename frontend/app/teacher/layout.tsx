@@ -1,7 +1,7 @@
 'use client'
 
 import { RoleGuard } from "@/components/auth/role-guard"
-import { UserRole } from "@/lib/moodle-auth"
+import { UserRole } from "@/lib/roles"
 import { TeacherNavbar } from "@/components/ui/teacher-navbar"
 
 export default function TeacherLayout({

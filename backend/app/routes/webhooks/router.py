@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 from app.database.connection import get_db
 from .utils import log_and_ack
 from .base_processor import WebhookProcessor
-from .debug import router as debug_router
 from .handlers import (
     handle_quiz_attempt_submitted,
     # new start events will reuse generic processor via lightweight endpoints
@@ -36,9 +35,6 @@ from .handlers import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
-
-# Include debug router for troubleshooting
-router.include_router(debug_router)
 
 # Event handlers mapping
 EVENT_HANDLERS = {

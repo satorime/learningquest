@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { useCurrentUser } from "@/hooks/useCurrentMoodleUser";
+import { useCurrentUser } from "@/hooks/use-current-user";
 import { apiClient } from "@/lib/api-client";
 import { toast } from "@/hooks/use-toast";
 import { useGlobalXPReward } from "@/contexts/xp-reward-context";

@@ -1,9 +1,11 @@
 "use client";
 
 import type React from "react";
-import { useCurrentUser } from "@/hooks/useCurrentMoodleUser";
+import { useCurrentUser } from "@/hooks/use-current-user";
 import { createQuest, QuestCreationResponse } from "@/lib/quest-service";
 import toast from "react-hot-toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { useNotify } from "@/components/ui/notify-dialog";
 
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
@@ -71,6 +73,8 @@ const stripHtmlTags = (html: string) => {
 };
 
 export function QuestCreator() {
+  const confirm = useConfirm();
+  const notify = useNotify();
   const [activities, setActivities] = useState<MoodleActivity[]>([]);
   const [activeActivities, setActiveActivities] = useState<MoodleActivity[]>(
     []
@@ -569,13 +573,18 @@ export function QuestCreator() {
                   <Button
                     type="button"
                     variant="destructive"
-                    onClick={() => {
-                      if (window.confirm("Are you sure you want to delete this quest?")) {
-                        // Call deleteQuest API here (mock)
-                        toast.success("Quest deleted (mock)");
-                        setSelectedActivity(null);
-                        setEditing(false);
-                      }
+                    onClick={async () => {
+                      const ok = await confirm({
+                        title: "Delete this quest?",
+                        description: "This can't be undone.",
+                        confirmText: "Delete",
+                        destructive: true,
+                      });
+                      if (!ok) return;
+                      // Call deleteQuest API here (mock)
+                      setSelectedActivity(null);
+                      setEditing(false);
+                      await notify({ variant: "success", description: "Quest deleted." });
                     }}
                   >
                     Delete Quest
