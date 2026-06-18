@@ -1,0 +1,71 @@
+# Render Blueprint for the LearningQuest FastAPI backend.
+# Deploy: Render Dashboard -> New -> Blueprint -> pick this repo. Render reads
+# this file; you fill in the secret env vars (marked sync:false) on first deploy.
+#
+# IMPORTANT: this app keeps SSE connections + the race engine in memory, so it
+# MUST run as a SINGLE instance/worker. Do NOT raise instance count or add
+# `--workers`. The free plan spins down after ~15 min idle (cold starts + drops
+# SSE); use "starter" for always-on.
+services:
+  - type: web
+    name: learningquest-api
+    runtime: python
+    rootDir: backend
+    plan: free               # change to "starter" for always-on
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      # --- non-secret defaults ---
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ENVIRONMENT
+        value: production
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      # Start on "local" for a guaranteed-green first deploy; switch to "gdrive"
+      # AFTER you've set GOOGLE_CLIENT_SECRET + DRIVE_TOKEN_ENC_KEY below.
+      # (NOTE: Render's disk is ephemeral, so "local" files do NOT persist —
+      # use "gdrive" for real submissions.)
+      - key: STORAGE_BACKEND
+        value: local
+      # --- set these in the dashboard (copied from your backend/.env) ---
+      - key: DATABASE_CONNECTION_STRING
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_DRIVE_REDIRECT_URI
+        sync: false
+      - key: DRIVE_TOKEN_ENC_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      # Email (optional — blank disables sending, codes log to the console)
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_USE_TLS
+        sync: false
