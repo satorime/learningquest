@@ -1,4 +1,10 @@
 {
+  "scripts": {
+    "dev": "npm run dev --prefix frontend",
+    "build": "npm ci --prefix frontend --legacy-peer-deps && npm run build --prefix frontend",
+    "start": "npm run start --prefix frontend",
+    "lint": "npm run lint --prefix frontend"
+  },
   "dependencies": {
     "zustand": "^5.0.4"
   }
